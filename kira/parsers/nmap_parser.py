@@ -88,8 +88,8 @@ class NmapResult:
                         raw = output.get("output", "")
                     else:
                         raw = output
-                        short = str(raw).strip().replace("\n", " ")[:120]
-                        lines.append(f"    [NSE:{script_id}] {short}")
+                    short = str(raw).strip().replace("\n", " ")[:120]
+                    lines.append(f"    [NSE:{script_id}] {short}")
         return "\n".join(lines)
 
 
