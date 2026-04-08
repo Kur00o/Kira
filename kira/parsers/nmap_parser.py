@@ -84,9 +84,12 @@ class NmapResult:
                     f"  {svc.port}/{svc.protocol}  {svc.name:<12}  {version_str}"
                 )
                 for script_id, output in svc.scripts.items():
-                    # Truncate long script output for summary
-                    short = output.strip().replace("\n", " ")[:120]
-                    lines.append(f"    [NSE:{script_id}] {short}")
+                    if isinstance(output, dict):
+                        raw = output.get("output", "")
+                    else:
+                        raw = output
+                        short = str(raw).strip().replace("\n", " ")[:120]
+                        lines.append(f"    [NSE:{script_id}] {short}")
         return "\n".join(lines)
 
 
