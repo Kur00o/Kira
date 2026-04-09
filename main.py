@@ -6,7 +6,7 @@ the Planner loop autonomously — no human input after startup.
 
 Usage:
     python main.py --target 10.10.10.5 --authorized-by "Lab VM"
-    python main.py --target 10.10.10.5 --authorized-by "HTB" --ollama-host http://192.168.1.42:11434
+    python main.py --target 10.10.10.5 --authorized-by "HTB" --ollama-host http://host:11434
     python main.py --target 10.10.10.5 --authorized-by "test" --no-msf --verbose
 
 Merge resolution: kept development branch entirely.
