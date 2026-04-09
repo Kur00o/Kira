@@ -21,25 +21,27 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── Kira modules ───────────────────────────────────────────────────────────────
 
-def _require_module(name: str, path: str):
-    try:
-        return __import__(name)
-    except ImportError:
-        print(f"[KIRA] ERROR: cannot import '{name}'. Is {path} in your project?")
-        sys.exit(1)
-
-from kira.state       import StateManager
-from kira.tool_runner import ToolRunner
-from kira.llm         import LLMClient
-from kira.planner     import Planner
+# ── Kira package root ─────────────────────────────────────────────────────────
+# Allow running as `python main.py` from the kira/ directory or project root.
+_HERE = Path(__file__).parent.resolve()
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
 try:
-    from kira.findings import KnowledgeBase
-    _KB_AVAILABLE = True
-except ImportError:
-    _KB_AVAILABLE = False
+    from state       import StateManager
+    from llm         import LLMClient
+    from tool_runner import ToolRunner
+    from findings    import KnowledgeBase
+    from planner     import Planner
+    from logger      import KiraLogger
+    from reporter    import ReportGenerator
+except ImportError as e:
+    print(f"[ERROR] Failed to import Kira module: {e}")
+    print("        Make sure you are running from the kira/ directory.")
+    sys.exit(1)
+
+_KB_AVAILABLE = True
 
 try:
     from pymetasploit3.msfrpc import MsfRpcClient as _MsfRpcClient
@@ -125,7 +127,122 @@ class MSFClient:
             return None, False, f"MSF connection error: {exc}"
 
 
-# ── Session summary ────────────────────────────────────────────────────────────
+# ── Session summary ────────────────────────────────────────────────────────
+
+def _make_session_dir(target: str, custom: str = None) -> Path:
+    """Create session directory with auto-generated name if needed."""
+    if custom:
+        d = Path(custom)
+    else:
+        safe   = target.replace(".", "_").replace("/", "_")
+        stamp  = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        d      = Path("sessions") / f"{safe}_{stamp}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# ── LLM factory ───────────────────────────────────────────────────────────────
+
+def build_llm(args, verbose: bool) -> LLMClient:
+    """Construct LLMClient from CLI args. Prints clear error on failure."""
+    provider = args.provider or "ollama"
+    kwargs   = {
+        "provider": provider,
+        "verbose":  verbose,
+    }
+    if args.model:
+        kwargs["model"] = args.model
+    if provider == "ollama":
+        kwargs["host"] = args.ollama_host
+    elif provider in ("anthropic", "openai"):
+        key = args.api_key or os.getenv(
+            "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY", ""
+        )
+        if not key:
+            _die(
+                f"Provider '{provider}' requires an API key.\n"
+                f"Pass --api-key sk-... or set the environment variable:\n"
+                f"  export {'ANTHROPIC_API_KEY' if provider == 'anthropic' else 'OPENAI_API_KEY'}=sk-..."
+            )
+        kwargs["api_key"] = key
+
+    try:
+        return LLMClient(**kwargs)
+    except ValueError as e:
+        _die(str(e))
+
+
+# ── MSF factory ───────────────────────────────────────────────────────────────
+
+def build_msf(no_msf: bool, args):
+    """Try to attach MSFClient. Returns None if --no-msf or unavailable."""
+    if no_msf:
+        _print_warn("--no-msf flag set — Metasploit integration disabled")
+        return None
+
+    try:
+        msf_client, msf_ok, msf_msg = MSFClient.connect(
+            host=args.msf_host, port=args.msf_port,
+            password=args.msf_pass, ssl=not args.msf_no_ssl,
+        )
+        if msf_ok:
+            _print_ok(f"Metasploit RPC connected: {msf_msg}")
+            return msf_client
+        else:
+            _print_warn(f"MSF unavailable: {msf_msg}")
+            return None
+    except Exception as e:
+        _print_warn(f"MSF init error: {e}")
+        return None
+
+
+# ── Report generation ─────────────────────────────────────────────────────────
+
+def run_report(
+    session_dir: Path,
+    llm:         LLMClient,
+    log:         KiraLogger,
+    outcome:     str,
+    finding_count: int,
+) -> None:
+    """
+    Invoke ReportGenerator. Called on DONE, ROOT, or MAX_ITER (if findings exist).
+    """
+    if finding_count == 0:
+        _print_warn("No findings recorded — skipping report generation.")
+        log.info("Report skipped: no findings")
+        return
+
+    log.info(f"Generating report (outcome={outcome}, findings={finding_count})")
+    _print_section("GENERATING REPORT")
+
+    try:
+        reporter = ReportGenerator(session_dir=str(session_dir), llm=llm)
+        paths    = reporter.generate()
+
+        _print_ok(f"Markdown report : {paths.markdown}")
+        _print_ok(f"HTML report     : {paths.html}")
+        log.info(f"Report complete: {paths.html}")
+
+        # Try to open in browser
+        _try_open_browser(paths.html)
+
+    except Exception as e:
+        _print_err(f"Report generation failed: {e}")
+        log.error("reporter", str(e))
+
+
+def _try_open_browser(html_path: str) -> None:
+    """Attempt to open the HTML report in the default browser."""
+    import webbrowser
+    try:
+        webbrowser.open(f"file://{Path(html_path).resolve()}")
+        print("[REPORT] Opening in browser...")
+    except Exception:
+        pass
+
+
+# ── Session summary ────────────────────────────────────────────────────────────────
 
 def _print_session_summary(state: StateManager, session_dir: Path, elapsed_s: float):
     """Print a compact summary table after the planner loop exits."""
@@ -176,6 +293,50 @@ def _print_session_summary(state: StateManager, session_dir: Path, elapsed_s: fl
     print()
 
 
+
+# ── Terminal helpers ──────────────────────────────────────────────────────────
+
+def _print_section(title: str) -> None:
+    try:
+        from rich.console import Console
+        Console().print(f"\n[bold cyan]{'─'*50}[/bold cyan]")
+        Console().print(f"[bold cyan]  {title}[/bold cyan]")
+        Console().print(f"[bold cyan]{'─'*50}[/bold cyan]")
+    except ImportError:
+        print(f"\n{'─'*50}")
+        print(f"  {title}")
+        print(f"{'─'*50}")
+
+
+def _print_ok(msg: str) -> None:
+    try:
+        from rich.console import Console
+        Console().print(f"[green]  ✓[/green] {msg}")
+    except ImportError:
+        print(f"  ✓ {msg}")
+
+
+def _print_warn(msg: str) -> None:
+    try:
+        from rich.console import Console
+        Console().print(f"[yellow]  ⚠[/yellow] {msg}")
+    except ImportError:
+        print(f"  ⚠ {msg}")
+
+
+def _print_err(msg: str) -> None:
+    try:
+        from rich.console import Console
+        Console().print(f"[red]  ✗[/red] {msg}")
+    except ImportError:
+        print(f"  ✗ {msg}")
+
+
+def _die(msg: str) -> None:
+    _print_err(msg)
+    sys.exit(1)
+
+
 # ── CLI argument parser ────────────────────────────────────────────────────────
 # CONFLICT RESOLUTION: kept development's --max-iter default of 50.
 # Discarded: main branch's default of 5 (too low for a real pentest).
@@ -189,21 +350,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python main.py --target 10.10.10.5 --authorized-by 'HTB Lab'\n"
             "  python main.py --target 10.10.10.5 --authorized-by 'test' --no-msf\n"
+            "  python main.py --target 10.10.10.5 --authorized-by 'test' --provider anthropic\n"
             "\n"
             "  [!] Only use against targets you are explicitly authorized to test."
         ),
     )
 
+    # Required
     parser.add_argument("--target", "-t", required=True,
                         help="Target IP address or hostname")
     parser.add_argument("--authorized-by", required=True, metavar="AUTHORIZATION",
                         help="Required: written confirmation of authorization")
+
+    # LLM
+    parser.add_argument("--provider", default=None,
+                        choices=["ollama", "anthropic", "openai"],
+                        help="LLM provider (default: ollama)")
     parser.add_argument("--ollama-host",
                         default=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
                         metavar="URL",
                         help="Ollama API URL (default: http://localhost:11434)")
-    parser.add_argument("--output", "-o", default="./kira_sessions", metavar="DIR",
-                        help="Root directory for session output")
+    parser.add_argument("--model", default=None,
+                        help="Override model name")
+    parser.add_argument("--api-key", default=None,
+                        help="API key for Anthropic or OpenAI")
+
+    # Session
+    parser.add_argument("--session-dir", default=None,
+                        help="Custom session directory (auto-generated if not set)")
     parser.add_argument("--max-iter", type=int, default=50, metavar="N",
                         help="Maximum planner loop iterations (default: 50)")
 
@@ -216,8 +390,11 @@ def _build_parser() -> argparse.ArgumentParser:
     msf.add_argument("--msf-no-ssl", action="store_true",
                      help="Disable SSL for msfrpcd connection")
 
+    # Flags
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Stream tool output to terminal")
+    parser.add_argument("--no-report", action="store_true",
+                        help="Skip automatic report generation at session end")
     parser.add_argument("--version", action="version", version=f"Kira {VERSION}")
 
     return parser
@@ -238,6 +415,16 @@ def main():
     parser = _build_parser()
     args   = parser.parse_args()
 
+    verbose = args.verbose
+
+    # ── Session directory ──────────────────────────────────────────────────────
+    session_dir = _make_session_dir(args.target, args.session_dir)
+    _print_ok(f"Session dir: {session_dir}")
+
+    # ── KiraLogger ─────────────────────────────────────────────────────────────
+    log = KiraLogger(session_dir=str(session_dir), verbose=verbose)
+    log.info(f"Kira session started — target={args.target}")
+
     # ── 1. Startup info ───────────────────────────────────────────────────────
     print(f"  Target        : {C.CYAN}{args.target}{C.RESET}")
     print(f"  Authorized by : {C.GREEN}{args.authorized_by}{C.RESET}")
@@ -245,52 +432,33 @@ def main():
     print(f"  MSF           : {'disabled (--no-msf)' if args.no_msf else f'{args.msf_host}:{args.msf_port}'}")
     print()
 
-    # ── 2. Session directory ──────────────────────────────────────────────────
-    safe_target = args.target.replace(".", "_").replace("/", "_")
-    timestamp   = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    session_dir = Path(args.output) / f"{safe_target}_{timestamp}"
-    session_dir.mkdir(parents=True, exist_ok=True)
-    print(f"  Session dir   : {session_dir}\n")
-
-    # ── 3. StateManager ───────────────────────────────────────────────────────
+    # ── StateManager ──────────────────────────────────────────────────────────
     state = StateManager(session_dir=str(session_dir))
     state.init(target=args.target, authorized_by=args.authorized_by)
+    _print_ok(f"Target: {args.target}  |  Authorized by: {args.authorized_by}")
 
-    # ── 4. LLM client + ping ──────────────────────────────────────────────────
-    print(f"{C.DIM}[INIT] Connecting to LLM at {args.ollama_host}...{C.RESET}")
-    llm = LLMClient(host=args.ollama_host, verbose=args.verbose)
-    llm_ok, llm_msg = llm.ping()
-    if llm_ok:
-        print(f"{C.GREEN}[OK  ] LLM: {llm_msg}{C.RESET}")
+    # ── LLM client + ping ──────────────────────────────────────────────────────
+    _print_section("CONNECTING TO LLM")
+    llm = build_llm(args, verbose)
+
+    ok, msg = llm.ping()
+    if ok:
+        _print_ok(f"LLM ready: [{llm.provider}] {llm.model}")
+        log.info(f"LLM connected: provider={llm.provider} model={llm.model}")
     else:
-        print(f"{C.RED}[FAIL] LLM: {llm_msg}{C.RESET}")
-        print(f"\n  Kira cannot run without a working LLM connection.")
-        print(f"  Fix: ollama pull gemma3:4b && OLLAMA_HOST=0.0.0.0 ollama serve")
-        sys.exit(1)
+        _print_warn(f"LLM ping failed: {msg}")
+        _print_warn("Continuing — agent will HALT if LLM is unreachable")
+        log.error("llm", f"Ping failed: {msg}")
 
-    # ── 5. MSF client — graceful degradation ─────────────────────────────────
-    msf_client = None
+    # ── MSF client — graceful degradation ─────────────────────────────────────
+    _print_section("METASPLOIT")
+    msf_client = build_msf(args.no_msf, args)
 
-    if args.no_msf:
-        print(f"{C.YELLOW}[SKIP] MSF disabled via --no-msf{C.RESET}")
-        print(f"       Kira will run RECON \u2192 ENUM \u2192 VULN_SCAN then stop.")
-    else:
-        print(f"{C.DIM}[INIT] Connecting to msfrpcd at {args.msf_host}:{args.msf_port}...{C.RESET}")
-        msf_client, msf_ok, msf_msg = MSFClient.connect(
-            host=args.msf_host, port=args.msf_port,
-            password=args.msf_pass, ssl=not args.msf_no_ssl,
-        )
-        if msf_ok:
-            print(f"{C.GREEN}[OK  ] MSF: {msf_msg}{C.RESET}")
-        else:
-            print(f"{C.YELLOW}[WARN] MSF unavailable: {msf_msg}{C.RESET}")
-            print(f"       Start msfrpcd: msfrpcd -P {args.msf_pass} "
-                  f"-p {args.msf_port} -a {args.msf_host}")
-            msf_client = None
-
-    # ── 6. ToolRunner ─────────────────────────────────────────────────────────
+    # ── ToolRunner + KnowledgeBase ────────────────────────────────────────────
     runner = ToolRunner(session_dir=str(session_dir),
-                        verbose=args.verbose, msf=msf_client)
+                        verbose=verbose, msf=msf_client)
+    kb = KnowledgeBase() if _KB_AVAILABLE else None
+
     avail   = runner.check_tools()
     present = [t for t, ok in avail.items() if ok]
     missing = [t for t, ok in avail.items() if not ok]
@@ -299,17 +467,27 @@ def main():
     if missing:
         print(f"{C.YELLOW}[WARN ] Missing:   {', '.join(missing)}{C.RESET}")
 
-    # ── 7. KnowledgeBase ──────────────────────────────────────────────────────
-    kb = KnowledgeBase() if _KB_AVAILABLE else None
-    if not _KB_AVAILABLE:
-        print(f"{C.DIM}[INFO] findings.py not built yet \u2014 kb=None{C.RESET}")
+    # ── Phase transition logger hook ──────────────────────────────────────────
+    # Monkey-patch StateManager.advance_phase to emit log.phase() events
+    _orig_advance = state.advance_phase
+    def _logged_advance():
+        old = state.phase
+        new = _orig_advance()
+        if new != old:
+            log.phase(old, new)
+            _print_section(f"PHASE: {old} → {new}")
+        return new
+    state.advance_phase = _logged_advance
 
-    # ── 8. Planner ────────────────────────────────────────────────────────────
+    # ── Planner ────────────────────────────────────────────────────────────────
+    _print_section("STARTING AGENT LOOP")
+    log.info(f"Agent loop starting: max_iter={args.max_iter}")
+
     planner = Planner(state=state, runner=runner, llm=llm,
                       msf=msf_client, kb=kb, verbose=True)
 
-    # ── 9. Run ────────────────────────────────────────────────────────────────
-    print(f"\n{C.GREEN}{C.BOLD}[KIRA] Agent loop starting...{C.RESET}")
+    # ── Run ────────────────────────────────────────────────────────────────────
+    print(f"{C.GREEN}{C.BOLD}[KIRA] Agent loop starting...{C.RESET}")
     print(f"{C.DIM}       Target: {args.target}  |  Max iterations: {args.max_iter}{C.RESET}\n")
 
     t_start = time.monotonic()
@@ -326,15 +504,29 @@ def main():
 
     elapsed = time.monotonic() - t_start
 
-    # ── 10. Exit ──────────────────────────────────────────────────────────────
+    # ── Session summary ────────────────────────────────────────────────────────
+    _print_section("SESSION COMPLETE")
+    finding_count = len(state.get("findings", []))
+    
     outcome_colors = {
         "DONE": C.GREEN, "ROOT": C.GREEN,
         "HALTED": C.YELLOW, "MAX_ITER": C.YELLOW,
         "INTERRUPTED": C.YELLOW, "ERROR": C.RED,
     }
-    print(f"\n{outcome_colors.get(outcome, C.DIM)}{C.BOLD}[KIRA] Session ended: {outcome}{C.RESET}")
-
+    print(f"{outcome_colors.get(outcome, C.DIM)}{C.BOLD}Outcome: {outcome}{C.RESET}")
+    
     _print_session_summary(state, session_dir, elapsed)
+    
+    log.info(f"Session ended: outcome={outcome} findings={finding_count}")
+
+    # ── Auto-report ────────────────────────────────────────────────────────────
+    if not args.no_report:
+        if outcome in ("DONE", "ROOT") or (outcome == "MAX_ITER" and finding_count > 0):
+            run_report(session_dir, llm, log, outcome, finding_count)
+        else:
+            _print_warn(f"No report generated (outcome={outcome}, findings={finding_count})")
+    else:
+        log.info("Report skipped: --no-report flag set")
 
     if outcome == "DONE":
         print(f"  {C.DIM}Next: run reporter.py to generate the full pentest report.{C.RESET}")
