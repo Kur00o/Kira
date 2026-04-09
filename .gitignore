@@ -1,0 +1,12 @@
+# Session data and logs
+sessions/
+*.log
+*.xml
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+.env.localsessions/

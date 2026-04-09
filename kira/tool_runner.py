@@ -103,16 +103,18 @@ class ToolRunner:
     msf         : optional MsfRpcClient — pass at construction or via attach_msf()
     """
 
+    # Default timeouts (seconds) per tool class
+    # Optimized for local environment with aggressive scanning
     TIMEOUTS = {
-        "nmap":         600,
-        "gobuster":     300,
-        "ffuf":         300,
-        "searchsploit":  30,
-        "enum4linux":   120,
-        "curl":          20,
-        "whatweb":       30,
-        "hydra":        600,
-        "default":      120,
+        "nmap":       180,   # Fast -sV with --min-rate 2000
+        "gobuster":   120,   # Directory brute-force
+        "ffuf":       120,
+        "searchsploit": 15,
+        "enum4linux": 60,
+        "curl":        10,
+        "whatweb":     15,
+        "hydra":      180,
+        "default":    60,
     }
 
     # ── __init__ ───────────────────────────────────────────────────────────────
