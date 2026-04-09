@@ -9,7 +9,7 @@ Kira is an LLM-driven agent that autonomously executes the full penetration test
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        main.py  (CLI)                           │
-│   args → ScopeGuard → StateManager → LLMClient → Planner.run() │
+│   args → ScopeGuard → StateManager → LLMClient → Planner.run()  │
 └──────────────────────────────┬──────────────────────────────────┘
                                │ observe → think → act loop
         ┌──────────────────────┼──────────────────────────┐
@@ -237,9 +237,9 @@ sessions/10_10_10_5_20260409_120000/
 
 ---
 
-## Day-by-Day Build Log
+## Build Log
 
-| Day | What was built |
+| Phase | What was built |
 |-----|---------------|
 | 1   | `state.py` (StateManager), `tool_runner.py` (ToolRunner), `llm.py` (LLMClient + Ollama), basic nmap integration |
 | 2   | `findings.py` (Finding + KnowledgeBase), `parsers/nmap_parser.py`, `parsers/gobuster_parser.py`, `parsers/service_enum.py` |
