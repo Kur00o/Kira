@@ -45,7 +45,7 @@ PROVIDER        = "ollama"           # ← change this to switch backends
 
 # Ollama (local)
 OLLAMA_HOST     = "http://localhost:11434"
-OLLAMA_MODEL    = "gemma3:4b"
+OLLAMA_MODEL    = "qwen2.5-coder:14b-instruct-q4_K_M"
 
 # Anthropic Claude (cloud)
 ANTHROPIC_KEY   = ""                 # or: export ANTHROPIC_API_KEY=sk-ant-...

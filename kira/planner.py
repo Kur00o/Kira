@@ -59,7 +59,7 @@ class PhaseController:
     """
     Tracks per-phase context focus and completion logic.
     Injected into the LLM prompt alongside the state summary
-    so Gemma 3 4B knows exactly what it should be doing right now.
+    so qwen2.5-coder:14b-instruct-q4_K_M knows exactly what it should be doing right now.
     """
 
     PHASE_FOCUS = {
