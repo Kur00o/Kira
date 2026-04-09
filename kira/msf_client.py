@@ -50,6 +50,7 @@ class MSFClient:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         password: str = DEFAULT_PASSWORD,
+        ssl: bool = True,
     ) -> bool:
         """
         Auto-start msfrpcd if not already running, then connect.
@@ -57,22 +58,21 @@ class MSFClient:
         """
         if self._is_msfrpcd_running(port):
             self.log.info("[MSF] msfrpcd already running — connecting")
-            return self.connect(host, port, password)
+            return self.connect(host, port, password, ssl=ssl)
 
         self.log.info("[MSF] msfrpcd not running — starting it now...")
         try:
-            subprocess.Popen(
-                [
-                    "msfrpcd",
-                    "-P", password,
-                    "-S",
-                    "-a", host,
-                    "-p", str(port),
-                    "-f",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            cmd = [
+                "msfrpcd",
+                "-P", password,
+                "-a", host,
+                "-p", str(port),
+                "-f",
+            ]
+            # msfrpcd -S runs without SSL; default mode is SSL-enabled.
+            if not ssl:
+                cmd.insert(3, "-S")
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             self.log.error("[MSF] msfrpcd not found — is metasploit installed?")
             self.log.error("      sudo apt install -y metasploit-framework")
@@ -83,7 +83,7 @@ class MSFClient:
         for attempt in range(1, 13):
             time.sleep(5)
             self.log.debug(f"[MSF] Attempt {attempt}/12...")
-            if self.connect(host, port, password):
+            if self.connect(host, port, password, ssl=ssl):
                 return True
 
         self.log.error("[MSF] msfrpcd failed to start after 60s")
@@ -104,6 +104,7 @@ class MSFClient:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         password: str = DEFAULT_PASSWORD,
+        ssl: bool = True,
     ) -> bool:
         """
         Connect to msfrpcd. Returns True on success.
@@ -115,7 +116,7 @@ class MSFClient:
                 password,
                 server=host,
                 port=port,
-                ssl=False,
+                ssl=ssl,
             )
             self.connected = True
             self.log.info(f"[MSF] Connected to msfrpcd at {host}:{port}")
@@ -231,8 +232,12 @@ class MSFClient:
 
             self.log.info(f"[MSF] Running {module} against {options.get('RHOSTS', '?')}")
             job    = mod.execute()
-            job_id = job.get("job_id")
-            uuid   = job.get("uuid", "")
+            if isinstance(job, dict):
+                job_id = job.get("job_id")
+                uuid   = job.get("uuid", "")
+            else:
+                job_id = None
+                uuid   = ""
             self.log.info(f"[MSF] Job started: id={job_id} uuid={uuid}")
 
             session_id = self._wait_for_session(uuid)
@@ -342,6 +347,11 @@ class MSFClient:
 
     def is_connected(self) -> bool:
         return self.connected and self._client is not None
+
+    @property
+    def client(self):
+        """Raw pymetasploit3 client for direct planner access."""
+        return self._client
 
 
 # ─────────────────────────────────────────────

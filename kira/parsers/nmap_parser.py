@@ -247,6 +247,48 @@ class NmapParser:
         return result
 
 
+def parse_nmap_xml(xml_path: str) -> NmapResult:
+    return NmapParser(xml_path).parse()
+
+
+def extract_state_fields(result: NmapResult) -> dict:
+    ports = [p["port"] for p in result.open_ports()]
+    services = {str(p["port"]): f"{p['product']} {p['version']}".strip()
+                for p in result.open_ports()}
+    os_guess = result.hosts[0].os_matches[0]["name"] if (
+        result.hosts and result.hosts[0].os_matches) else None
+    hostnames = [h.hostname for h in result.hosts if h.hostname]
+    return {
+        "open_ports": ports,
+        "services": services,
+        "os_guess": os_guess,
+        "hostnames": hostnames,
+    }
+
+
+def get_notable_script_findings(result: NmapResult) -> list[dict]:
+    findings = []
+    for host in result.hosts:
+        for svc in host.services:
+            if svc.state != "open":
+                continue
+            for script_id, output in svc.scripts.items():
+                raw = output.get("output", "") if isinstance(output, dict) else output
+                if any(kw in str(raw).lower() for kw in
+                       ["vuln", "exploit", "backdoor", "anonymous", "weak"]):
+                    findings.append({
+                        "title": f"NSE: {script_id} on port {svc.port}",
+                        "severity": "medium",
+                        "port": svc.port,
+                        "service": svc.name,
+                        "cvss": 5.0,
+                        "description": str(raw)[:300],
+                        "exploit_available": "exploit" in str(raw).lower(),
+                        "remediation": "Review NSE script output manually.",
+                    })
+    return findings
+
+
 # CLI smoke test
 if __name__ == "__main__":
     import sys

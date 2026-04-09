@@ -2,7 +2,7 @@
 phase_controller.py — Kira Autonomous Penetration Testing Agent
 Defines what "done" means for each phase and what tools the LLM is allowed to pick.
 The planner reads phase focus text in every prompt — tight phase definitions
-stop Gemma from jumping to exploitation before it has finished enumerating.
+stop qwen2.5-coder:14b-instruct-q4_K_M from jumping to exploitation before it has finished enumerating.
 
 Usage:
     from phase_controller import PHASE_CRITERIA, get_phase_prompt, is_phase_complete, get_allowed_tools
@@ -60,7 +60,7 @@ PHASE_ORDER = ["RECON", "ENUM", "VULN_SCAN", "EXPLOIT", "POST_EXPLOIT"]
 def get_phase_prompt(phase: str, state: dict) -> str:
     """
     Returns a focused instruction string injected into every LLM prompt.
-    Tells Gemma exactly what the current phase expects and what tools to use.
+    Tells qwen2.5-coder:14b-instruct-q4_K_M exactly what the current phase expects and what tools to use.
 
     Args:
         phase: current phase key e.g. "RECON"

@@ -59,6 +59,17 @@ DEFAULT_TIMEOUT = 120
 MAX_RETRIES     = 3
 RETRY_DELAY     = 1.5
 
+# Per-phase temperature: lower for deterministic exploitation decisions.
+PHASE_TEMPERATURE = {
+    "RECON":        0.2,
+    "ENUM":         0.2,
+    "VULN_SCAN":    0.15,
+    "EXPLOIT":      0.15,
+    "POST_EXPLOIT": 0.15,
+    "REPORT":       0.30,
+}
+DEFAULT_TEMPERATURE = 0.2
+
 
 # ── Valid tools (unchanged from Day 3) ────────────────────────────────────────
 
@@ -91,7 +102,7 @@ RULES:
 5. Only emit REPORT when you have at least one confirmed vulnerability finding.
 
 VALID TOOLS AND THEIR ARGS:
-  nmap_scan        : {"target": "IP", "flags": "-sV -sC", "ports": "22,80"}
+  nmap_scan        : {"target": "IP", "flags": "-sV -sC", "ports": "-"}
   gobuster_dir     : {"url": "http://IP", "wordlist": "/path/to/list.txt"}
   searchsploit     : {"query": "service version string"}
   enum4linux       : {"target": "IP"}
@@ -238,7 +249,8 @@ class LLMClient:
         """
         phase_hint = f"\nCurrent phase: {phase}" if phase else ""
         user_msg   = f"{context_summary}{phase_hint}\n\nWhat is your next action?"
-        return self.ask(user=user_msg)
+        temperature = PHASE_TEMPERATURE.get(phase, DEFAULT_TEMPERATURE)
+        return self.ask(user=user_msg, temperature=temperature)
 
     # ── Public: free-text generation (reporter mode) ──────────────────────────
 
