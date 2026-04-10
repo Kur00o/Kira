@@ -1,10 +1,10 @@
 <div align="center">
 
 ```
-  _  ___
+   _  ___          
  | |/ (_)_ _ __ _
- | ' <| | '_/ _` |
- |_|\_\_|_| \__,_|
+  | ' <| | '_/ _` |
+  |_|\_\_|_| \__,_|
 ```
 
 **AUTONOMOUS PENETRATION TESTING AGENT**
