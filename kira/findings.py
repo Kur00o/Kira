@@ -167,8 +167,28 @@ class KnowledgeBase:
         return True
 
     def add_from_dict(self, d: dict) -> bool:
-        """Convenience: construct Finding from dict and add."""
-        return self.add(Finding.from_dict(d))
+        """Convenience: construct Finding from dict and add. Sanitizes input."""
+        # Sanitize severity
+        sev = str(d.get("severity", "info")).strip().lower()
+        if sev not in VALID_SEVERITIES:
+            sev = "info"
+        # Sanitize cvss
+        try:
+            cvss = float(d.get("cvss", 0.0))
+            cvss = max(0.0, min(10.0, cvss))
+        except (TypeError, ValueError):
+            cvss = 0.0
+        # Sanitize port
+        try:
+            port = int(d.get("port", 0))
+        except (TypeError, ValueError):
+            port = 0
+
+        clean = {**d, "severity": sev, "cvss": cvss, "port": port}
+        try:
+            return self.add(Finding.from_dict(clean))
+        except Exception:
+            return False
 
     def remove(self, title: str, port: int) -> bool:
         """Remove a finding by (title, port). Returns True if found."""

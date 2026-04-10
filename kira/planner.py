@@ -17,7 +17,7 @@ from typing import Optional
 
 PHASE_COMPLETION = {
     "RECON":        ["open_ports"],
-    "ENUM":         ["open_ports", "findings"],
+    "ENUM":         ["open_ports"],   # ENUM completes when services enumerated; findings not required
     "VULN_SCAN":    ["findings"],
     "EXPLOIT":      ["sessions"],
     "POST_EXPLOIT": ["current_user"],
@@ -26,7 +26,7 @@ PHASE_COMPLETION = {
 }
 
 # Minimum findings required before REPORT is valid
-MIN_FINDINGS_FOR_REPORT = 1
+MIN_FINDINGS_FOR_REPORT = 0
 
 
 class PhaseController:
@@ -37,23 +37,31 @@ class PhaseController:
 
     PHASE_FOCUS = {
         "RECON": (
-            "Run an nmap scan on heavily used ports "
-            "(22,25,53,80,443,8080,3128,4443,4444,8090,8443) if you haven't yet. "
-            "Goal: discover service versions on the approved default port set."
+            "Run nmap_scan with no ports argument to trigger a full 65535-port sweep "
+            "followed by a targeted version scan on discovered ports. "
+            "Goal: find every open port and its service version."
         ),
         "ENUM": (
-            "Enumerate each discovered service. Run gobuster on HTTP ports, "
-            "enum4linux on SMB, curl/whatweb for server banners. "
-            "Goal: find web paths, usernames, shares, and version strings."
+            "Enumerate each discovered service. For HTTP services, run tools in this order: "
+            "curl_probe (get banner), whatweb (fingerprint), gobuster_dir (find paths), "
+            "then searchsploit for each service version found. "
+            "IMPORTANT: Always include the correct port in URLs (e.g. http://IP:8080/). "
+            "After enumeration, use add_finding to record any vulnerabilities, "
+            "then advance_phase to move to VULN_SCAN."
         ),
         "VULN_SCAN": (
             "Cross-reference every service version with searchsploit. "
-            "Add findings for each CVE found. "
+            "For EACH service in the services list, call searchsploit with the exact "
+            "version string (e.g. 'Apache httpd 2.4.25', 'OpenSSH 7.4'). "
+            "After each searchsploit call, findings are auto-added. "
+            "Once all services are checked, call advance_phase. "
             "Goal: build a prioritised list of exploitable vulnerabilities."
         ),
         "EXPLOIT": (
-            "Attempt exploitation of the highest-CVSS finding with an "
-            "available Metasploit module. "
+            "Attempt exploitation. FIRST call msf_search with the service name "
+            "(e.g. 'apache') to get real Metasploit module names. "
+            "Then call msf_exploit with a module from those results — NEVER invent module names. "
+            "Set RPORT to the correct port (e.g. 8080). "
             "Goal: obtain a shell session."
         ),
         "POST_EXPLOIT": (
@@ -78,6 +86,17 @@ class PhaseController:
         required = PHASE_COMPLETION.get(self._state.phase, [])
         for key in required:
             if not self._state.get(key):
+                return False
+        # For ENUM: also require that at least one enumeration tool has run
+        # AND searchsploit has been attempted for service version info
+        if self._state.phase == "ENUM":
+            enum_tools = {"searchsploit", "curl_probe", "whatweb", "enum4linux", "gobuster_dir"}
+            actions = self._state.get("actions_taken") or []
+            ran = {a.get("tool") for a in actions}
+            if not ran.intersection(enum_tools):
+                return False
+            # Don't advance until searchsploit has been tried
+            if "searchsploit" not in ran:
                 return False
         return True
 
@@ -116,6 +135,9 @@ class Planner:
         self._phase_ctrl = PhaseController(state)
         self._action_history: list[str] = []
 
+    # Ordered steps the planner enforces in ENUM regardless of LLM choice
+    ENUM_SEQUENCE = ["curl_probe", "whatweb", "searchsploit", "gobuster_dir"]
+
     def run(self, max_iterations: int = 10) -> str:
         if self._verbose:
             self._print_banner()
@@ -131,6 +153,17 @@ class Planner:
             args = action.get("args", {}) or {}
             reasoning = action.get("reasoning", "")
 
+            # ── Programmatic ENUM sequencer ───────────────────────────────
+            # Override LLM if it picks a tool already done or loops on curl_probe
+            if self._state.phase == "ENUM":
+                forced = self._next_enum_step()
+                if forced and forced != tool:
+                    if self._verbose:
+                        self._print_info(f"ENUM sequencer: overriding '{tool}' → '{forced}'")
+                    tool = forced
+                    args = self._default_enum_args(forced)
+                    action = {"tool": tool, "args": args, "reasoning": f"ENUM sequencer: running {forced}"}
+
             if self._verbose:
                 self._print_action(tool, args, reasoning)
 
@@ -139,10 +172,16 @@ class Planner:
                     f"Anti-loop guard triggered: '{tool}' with identical args "
                     f"seen {self.MAX_SAME_ACTION} times consecutively."
                 )
-                self._state.log_action("HALT", {}, msg)
+                self._state.log_action("ANTI_LOOP", {}, msg)
                 if self._verbose:
                     self._print_warn(msg)
-                return "HALTED"
+                # Instead of halting, inject a recovery note and continue
+                self._state.add_note(
+                    f"LOOP DETECTED: Do NOT call '{tool}' again with the same args. "
+                    f"Try a different tool or advance_phase."
+                )
+                self._action_history.clear()
+                continue
 
             if tool == "HALT":
                 self._state.log_action("HALT", args, reasoning)
@@ -168,6 +207,23 @@ class Planner:
                 return "DONE"
 
             result_summary = self._dispatch(action)
+
+            # Auto-inject msf_search at start of EXPLOIT if LLM skips it
+            if (self._state.phase == "EXPLOIT"
+                    and tool == "msf_exploit"
+                    and self._msf is not None):
+                actions = self._state.get("actions_taken") or []
+                has_searched = any(a.get("tool") == "msf_search" for a in actions)
+                if not has_searched:
+                    # Run msf_search automatically before the exploit attempt
+                    services = dict(self._state.get("services") or {})
+                    query = list(services.values())[0].split()[0].lower() if services else "apache"
+                    search_result = self._do_msf_search({"query": query})
+                    self._state.log_action("msf_search", {"query": query}, search_result)
+                    if self._verbose:
+                        self._print_info(f"Auto msf_search: {search_result}")
+                    # Now re-validate the module the LLM picked
+                    result_summary = self._dispatch(action)
 
             if self._logger:
                 self._logger.action(
@@ -218,6 +274,8 @@ class Planner:
                 return self._do_curl(args)
             if tool == "whatweb":
                 return self._do_whatweb(args)
+            if tool == "msf_search":
+                return self._do_msf_search(args)
             if tool == "msf_exploit":
                 return self._do_msf_exploit(args)
             if tool == "shell_cmd":
@@ -243,9 +301,58 @@ class Planner:
     def _do_nmap(self, args: dict, target: str) -> str:
         tgt = args.get("target", target)
         flags = args.get("flags", "-sV -sC")
-        ports = _normalize_ports_arg(args.get("ports")) or NMAP_HEAVY_PORTS
+        ports_arg = _normalize_ports_arg(args.get("ports"))
 
-        result = self._runner.nmap(target=tgt, flags=flags, ports=ports)
+        # ── Two-stage RECON ───────────────────────────────────────────────
+        # Stage 1: fast SYN scan across all 65535 ports (no version detection)
+        # Stage 2: targeted -sV -sC only on the open ports found
+        # Skip stage 1 if caller explicitly passed a port list or we already
+        # have open ports in state (e.g. re-running nmap in a later phase).
+        existing_ports = list(self._state.get("open_ports") or [])
+        run_full_scan = (
+            not ports_arg
+            and not existing_ports
+            and self._state.phase == "RECON"
+        )
+
+        if run_full_scan:
+            if self._verbose:
+                self._print_info("Stage 1: full port sweep (all 65535 ports, no version)...")
+            sweep = self._runner.nmap(
+                target=tgt,
+                flags="-sS -T4 --min-rate 5000 --open",
+                ports=NMAP_FULL_PORTS,
+                timeout=300,
+            )
+            discovered = []
+            if sweep.ok and sweep.artifact_path:
+                try:
+                    from kira.parsers.nmap_parser import parse_nmap_xml, extract_state_fields
+                    parsed = parse_nmap_xml(sweep.artifact_path)
+                    fields = extract_state_fields(parsed)
+                    discovered = fields.get("open_ports", [])
+                except Exception:
+                    pass
+
+            if not discovered:
+                # Fallback: parse from stdout if XML failed
+                import re
+                for line in (sweep.stdout or "").splitlines():
+                    m = re.match(r"(\d+)/tcp\s+open", line)
+                    if m:
+                        discovered.append(int(m.group(1)))
+
+            if not discovered:
+                return f"Stage 1 sweep found no open ports on {tgt}. rc={sweep.returncode}"
+
+            ports_arg = ",".join(str(p) for p in sorted(discovered))
+            if self._verbose:
+                self._print_info(f"Stage 1 found {len(discovered)} open ports: {discovered}")
+                self._print_info(f"Stage 2: version scan on ports {ports_arg}...")
+
+        # Stage 2 (or single-stage if ports were specified)
+        use_ports = ports_arg or NMAP_HEAVY_PORTS
+        result = self._runner.nmap(target=tgt, flags=flags, ports=use_ports)
         if result.ok and result.artifact_path:
             try:
                 from kira.parsers.nmap_parser import (
@@ -269,8 +376,18 @@ class Planner:
         return result.summary
 
     def _do_gobuster(self, args: dict) -> str:
-        url = _normalize_http_tool_url(args.get("url") or _default_http_url(self._state), self._state)
+        raw_url = args.get("url") or _default_http_url(self._state)
+        url = _normalize_http_tool_url(raw_url, self._state)
         wordlist = args.get("wordlist", "/usr/share/wordlists/dirb/common.txt")
+        # Try a different wordlist if the default one already returned 0 results
+        actions = self._state.get("actions_taken") or []
+        prior_gobuster = [
+            a for a in actions
+            if a.get("tool") == "gobuster_dir"
+            and "Found 0 paths" in (a.get("result_summary") or "")
+        ]
+        if prior_gobuster and wordlist == "/usr/share/wordlists/dirb/common.txt":
+            wordlist = "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
         result = self._runner.gobuster(url=url, wordlist=wordlist)
         if result.ok:
             try:
@@ -292,18 +409,78 @@ class Planner:
         query = args.get("query", "")
         if not query:
             return "searchsploit skipped — no query provided"
-        result = self._runner.searchsploit(query=query)
-        if result.ok and result.stdout:
-            try:
-                from kira.parsers.vuln_scanner import parse_searchsploit_json
-                findings = parse_searchsploit_json(result.stdout)
-                if self._kb:
-                    for f in findings:
-                        self._kb.add_from_dict(f)
-                return f"searchsploit '{query}': {len(findings)} results"
-            except Exception as e:
-                return f"searchsploit OK but parse failed: {e}. raw: {result.summary}"
-        return result.summary
+
+        # Normalize query: "Apache httpd 2.4.25" → try exact, then fallback to shorter
+        queries_to_try = [query]
+        parts = query.split()
+        if len(parts) >= 2:
+            # e.g. "Apache httpd 2.4.25" → "Apache 2.4.25", "apache 2.4"
+            queries_to_try.append(f"{parts[0]} {parts[-1]}")
+            version = parts[-1]
+            if "." in version:
+                short_ver = ".".join(version.split(".")[:2])
+                queries_to_try.append(f"{parts[0]} {short_ver}")
+
+        raw_results = []
+        used_query = query
+        for q in queries_to_try:
+            result = self._runner.searchsploit(q)
+            if result.ok and result.stdout:
+                try:
+                    from kira.parsers.vuln_scanner import parse_searchsploit_json
+                    raw_results = parse_searchsploit_json(result.stdout)
+                    if raw_results:
+                        used_query = q
+                        break
+                except Exception as e:
+                    return f"searchsploit parse failed: {e}"
+
+        if not raw_results:
+            return f"searchsploit '{query}': 0 results"
+
+        # Determine port from state services matching the query
+        port = 0
+        services = dict(self._state.get("services") or {})
+        for p_str, svc in services.items():
+            if any(word.lower() in str(svc).lower() for word in query.split()):
+                try:
+                    port = int(p_str)
+                except ValueError:
+                    pass
+                break
+
+        type_cvss = {"remote": 9.0, "webapps": 8.5, "local": 7.0,
+                     "dos": 5.0, "shellcode": 8.0, "papers": 0.0}
+
+        added = 0
+        for r in raw_results[:10]:
+            edb_type = r.get("type", "").lower()
+            cvss = type_cvss.get(edb_type, 5.0)
+            severity = (
+                "critical" if cvss >= 9.0 else
+                "high"     if cvss >= 7.0 else
+                "medium"   if cvss >= 4.0 else
+                "low"
+            )
+            finding = {
+                "title": r.get("title", query),
+                "severity": severity,
+                "port": port,
+                "service": query.split()[0] if query else "",
+                "cvss": cvss,
+                "cve": r.get("cve") or "",
+                "exploit_available": edb_type in ("remote", "webapps", "shellcode"),
+                "description": f"EDB-ID {r.get('edb_id','?')}: {r.get('title','')}",
+                "remediation": "Apply vendor patch or upgrade to latest version.",
+            }
+            if self._kb:
+                self._kb.add_from_dict(finding)
+            else:
+                self._state.add_finding(finding)
+            added += 1
+
+        self._sync_kb_to_state()
+        return f"searchsploit '{used_query}': {len(raw_results)} results, {added} findings added"
 
     def _do_enum4linux(self, args: dict, target: str) -> str:
         tgt = args.get("target", target)
@@ -313,7 +490,10 @@ class Planner:
 
     def _do_curl(self, args: dict) -> str:
         url = _normalize_http_tool_url(args.get("url") or _default_http_url(self._state), self._state)
-        flags = args.get("flags", "-sI")
+        flags = args.get("flags", "-sIL --max-time 10")
+        # Always add --max-time if not present to avoid rc=28 timeouts
+        if "--max-time" not in flags:
+            flags = flags + " --max-time 10"
         result = self._runner.curl(url=url, flags=flags)
         if result.ok:
             for line in result.stdout.splitlines():
@@ -329,16 +509,111 @@ class Planner:
 
     def _do_whatweb(self, args: dict) -> str:
         url = _normalize_http_tool_url(args.get("url") or _default_http_url(self._state), self._state)
-        result = self._runner.whatweb(url=url)
+        result = self._runner.whatweb(url=url, timeout=60)
         return result.summary
+
+    def _do_msf_search(self, args: dict) -> str:
+        """Search Metasploit for real module names matching a query."""
+        query = args.get("query", "")
+        if not query:
+            return "msf_search: no query provided"
+        results = self._msf_search(query)
+        if not results:
+            return f"msf_search '{query}': no modules found"
+        names = [r["module"] for r in results[:8]]
+        # Store in notes so LLM can see them
+        self._state.add_note(f"MSF modules for '{query}': {', '.join(names)}")
+        return f"msf_search '{query}': found {len(results)} modules — {names[:5]}"
 
     def _do_msf_exploit(self, args: dict) -> str:
         if self._msf is None:
             return "Metasploit RPC not connected."
-        # Delegate to ToolRunner if available
-        if hasattr(self._runner, "msf_exploit"):
-            return self._runner.msf_exploit(args).summary
-        return "msf_exploit not implemented in this build."
+
+        module = args.get("module", "")
+        options = args.get("options", {}) or {}
+        target = self._state.target or ""
+
+        if not options.get("RHOSTS"):
+            options["RHOSTS"] = target
+
+        # If no module specified, search for one based on known services
+        if not module:
+            services = dict(self._state.get("services") or {})
+            for svc in services.values():
+                query = svc.split()[0].lower() if svc else ""
+                if query:
+                    break
+            else:
+                return "msf_exploit: no module specified and no services to search"
+            results = self._msf_search(query)
+            if not results:
+                return f"msf_exploit: no modules found for '{query}'"
+            module = results[0]["module"]
+
+        # Validate module exists via MSF search before running
+        mod_short = module.split("/")[-1] if "/" in module else module
+        found = self._msf_search(mod_short)
+        valid_modules = [r["module"] for r in found]
+
+        # Check if the exact module path exists
+        full_path = module.lstrip("exploit/").lstrip("exploits/")
+        module_exists = any(
+            full_path in r["module"] or module in r["module"]
+            for r in found
+        )
+
+        if not module_exists and found:
+            # Use the best real match instead of the hallucinated one
+            module = found[0]["module"]
+            if not module.startswith("exploit"):
+                module = f"exploit/{module}"
+            self._state.add_note(f"Module substituted: using {module} (original not found)")
+
+        elif not module_exists:
+            return (
+                f"msf_exploit: module '{module}' not found in Metasploit. "
+                f"Use msf_search first to find a valid module name."
+            )
+
+        try:
+            # Use the kira MSFClient wrapper if available (has run_module)
+            if hasattr(self._msf, 'run_module'):
+                result = self._msf.run_module(module=module, options=options)
+                if result.get("success") and result.get("session_id"):
+                    sid = result["session_id"]
+                    sessions = list(self._state.get("sessions") or [])
+                    sessions.append({"id": sid, "type": "shell", "via": module})
+                    self._state.update(sessions=sessions)
+                    return f"Session {sid} opened via {module}"
+                return f"msf_exploit ran '{module}': {result.get('output') or result.get('error') or 'no session'}"
+            else:
+                # Raw pymetasploit3 client
+                if hasattr(self._runner, "msf_exploit"):
+                    return self._runner.msf_exploit(args).summary
+                return "msf_exploit: runner has no msf_exploit method"
+        except Exception as e:
+            return f"msf_exploit error: {e}"
+
+    def _msf_search(self, query: str) -> list[dict]:
+        """Search MSF for modules matching query. Returns list of dicts."""
+        if self._msf is None:
+            return []
+        try:
+            if hasattr(self._msf, 'search'):
+                return self._msf.search(query) or []
+            # Raw pymetasploit3 — search via modules list
+            results = []
+            for mtype in ["exploits", "auxiliary"]:
+                try:
+                    mods = self._msf.modules.list(mtype)
+                    for name in mods:
+                        if query.lower() in name.lower():
+                            results.append({"module": f"{mtype.rstrip('s')}/{name}", "type": mtype})
+                except Exception:
+                    continue
+            return results[:10]
+        except Exception:
+            return []
 
     def _do_shell_cmd(self, args: dict) -> str:
         if self._msf is None:
@@ -386,8 +661,59 @@ class Planner:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
+    def _next_enum_step(self) -> Optional[str]:
+        """
+        Return the next ENUM tool that hasn't been successfully run yet.
+        Returns None if all steps are done (let LLM decide).
+        """
+        actions = self._state.get("actions_taken") or []
+        ran_ok = {
+            a.get("tool") for a in actions
+            if not (a.get("result_summary") or "").startswith(("FAILED", "TIMEOUT", "BLOCKED"))
+        }
+        for step in self.ENUM_SEQUENCE:
+            if step not in ran_ok:
+                return step
+        return None  # all steps done
+
+    def _default_enum_args(self, tool: str) -> dict:
+        """Return sensible default args for each ENUM tool."""
+        target = self._state.target or ""
+        open_ports = list(self._state.get("open_ports") or [])
+        # Pick the first HTTP port
+        http_port = next((p for p in (8080, 80, 8443, 443, 8000, 8090) if p in open_ports), 80)
+        scheme = "https" if http_port in (443, 8443) else "http"
+        base_url = f"{scheme}://{target}:{http_port}/" if http_port not in (80, 443) else f"{scheme}://{target}/"
+
+        services = dict(self._state.get("services") or {})
+        # Build searchsploit query from first service version
+        ss_query = "apache"
+        for svc in services.values():
+            if svc:
+                parts = svc.split()
+                # "Apache httpd 2.4.25" → "apache 2.4"
+                name = parts[0].lower()
+                ver = parts[-1] if len(parts) > 1 else ""
+                short_ver = ".".join(ver.split(".")[:2]) if "." in ver else ver
+                ss_query = f"{name} {short_ver}".strip()
+                break
+
+        defaults = {
+            "curl_probe":   {"url": base_url, "flags": "-sIL --max-time 10"},
+            "whatweb":      {"url": base_url},
+            "searchsploit": {"query": ss_query},
+            "gobuster_dir": {"url": base_url, "wordlist": "/usr/share/wordlists/dirb/common.txt"},
+        }
+        return defaults.get(tool, {})
+
     def _anti_loop_check(self, tool: str, args: dict) -> bool:
-        key = f"{tool}:{json.dumps(args, sort_keys=True)}"
+        # Normalize URLs in args to avoid false negatives (trailing slash differences)
+        normalized = {}
+        for k, v in args.items():
+            if isinstance(v, str) and v.startswith("http"):
+                v = v.rstrip("/") + "/"
+            normalized[k] = v
+        key = f"{tool}:{json.dumps(normalized, sort_keys=True)}"
         self._action_history.append(key)
         tail = self._action_history[-self.MAX_SAME_ACTION:]
         return len(tail) == self.MAX_SAME_ACTION and len(set(tail)) == 1
@@ -396,14 +722,43 @@ class Planner:
         if self._kb is None:
             return
         try:
-            self._state.update(findings=self._kb.to_state_dicts())
-        except Exception:
+            dicts = self._kb.to_state_dicts()
+            if dicts:
+                self._state.update(findings=dicts)
+        except Exception as e:
+            # Fallback: write findings directly without KB
             pass
 
     def _check_phase_gate(self) -> Optional[str]:
         if not self._phase_ctrl.is_phase_complete():
+            # Safety: if VULN_SCAN has run searchsploit on all services but found
+            # nothing exploitable, still advance rather than loop forever
+            if self._state.phase == "VULN_SCAN":
+                actions = self._state.get("actions_taken") or []
+                ss_runs = [a for a in actions if a.get("tool") == "searchsploit"]
+                services = dict(self._state.get("services") or {})
+                if len(ss_runs) >= max(len(services), 1):
+                    old = self._state.phase
+                    new = self._state.advance_phase()
+                    if self._verbose:
+                        self._print_info(f"Phase gate (no findings): {old} → {new}")
+                    return None
             return None
         current = self._state.phase
+        # VULN_SCAN: only advance if we actually ran searchsploit in THIS phase
+        if current == "VULN_SCAN":
+            actions = self._state.get("actions_taken") or []
+            vuln_scan_entry = next(
+                (i for i, a in enumerate(actions) if a.get("tool") == "advance_phase"
+                 or (a.get("result_summary", "").startswith("Phase advanced") and "ENUM" in a.get("result_summary", ""))),
+                0
+            )
+            ss_in_vuln = [
+                a for a in actions[vuln_scan_entry:]
+                if a.get("tool") == "searchsploit"
+            ]
+            if not ss_in_vuln:
+                return None  # don't advance yet, let VULN_SCAN do its work
         if current == "POST_EXPLOIT":
             self._state.update(phase="REPORT")
             return "DONE"
@@ -548,6 +903,7 @@ def _normalize_http_tool_url(url: str, state) -> str:
 
 
 NMAP_HEAVY_PORTS = "22,25,53,80,443,3128,4443,4444,8090,8443"
+NMAP_FULL_PORTS  = "-"   # all 65535 ports
 
 
 def _normalize_ports_arg(ports: Optional[str]) -> Optional[str]:

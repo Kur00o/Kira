@@ -19,7 +19,14 @@ PHASE_CRITERIA = {
         "allowed_tools": ["nmap_scan", "add_note"],
     },
     "ENUM": {
-        "complete_when": lambda s: len(s.get("findings", [])) > 0,
+        "complete_when": lambda s: (
+            len(s.get("findings", [])) > 0
+            or len(s.get("web_paths", [])) > 0
+            or any(
+                a.get("tool") in ("searchsploit", "curl_probe", "whatweb", "enum4linux")
+                for a in s.get("actions_taken", [])
+            )
+        ),
         "focus": "Enumerate every service. Gobuster on HTTP. Check FTP anon, SMB.",
         "allowed_tools": [
             "gobuster_dir",
@@ -29,6 +36,7 @@ PHASE_CRITERIA = {
             "searchsploit",
             "add_finding",
             "add_note",
+            "advance_phase",
         ],
     },
     "VULN_SCAN": {
@@ -41,7 +49,7 @@ PHASE_CRITERIA = {
     "EXPLOIT": {
         "complete_when": lambda s: len(s.get("sessions", [])) > 0,
         "focus": "Run the highest-CVSS MSF module. Get a shell.",
-        "allowed_tools": ["msf_exploit", "shell_cmd", "add_note"],
+        "allowed_tools": ["msf_search", "msf_exploit", "shell_cmd", "add_note"],
     },
     "POST_EXPLOIT": {
         "complete_when": lambda s: s.get("is_root", False),

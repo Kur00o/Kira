@@ -106,7 +106,7 @@ class ToolRunner:
     # Default timeouts (seconds) per tool class
     # Optimized for local environment with aggressive scanning
     TIMEOUTS = {
-        "nmap":       180,   # Fast -sV with --min-rate 2000
+        "nmap":       600,   # Full port sweep + version scan can take time
         "gobuster":   120,   # Directory brute-force
         "ffuf":       120,
         "searchsploit": 15,
