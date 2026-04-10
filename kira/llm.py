@@ -59,6 +59,17 @@ DEFAULT_TIMEOUT = 120
 MAX_RETRIES     = 3
 RETRY_DELAY     = 1.5
 
+# Per-phase temperature: lower for deterministic exploitation decisions.
+PHASE_TEMPERATURE = {
+    "RECON":        0.2,
+    "ENUM":         0.2,
+    "VULN_SCAN":    0.15,
+    "EXPLOIT":      0.15,
+    "POST_EXPLOIT": 0.15,
+    "REPORT":       0.30,
+}
+DEFAULT_TEMPERATURE = 0.2
+
 
 # ── Valid tools (unchanged from Day 3) ────────────────────────────────────────
 
@@ -72,44 +83,41 @@ VALID_TOOLS = [
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = textwrap.dedent("""
-You are Kira, an autonomous penetration testing AI agent operating inside an
-authorized security lab environment.
+You are Kira, an autonomous penetration testing AI agent.
+Reply with ONLY a raw JSON object — no markdown, no prose, no code fences.
 
-Your job is to analyse the current session state and decide the single best
-next action to advance the pentest toward root access and a complete report.
+Required keys:
+  "tool"      : tool name (string)
+  "args"      : arguments (object, can be {})
+  "reasoning" : one sentence (string)
 
 RULES:
-1. You MUST reply with ONLY a valid JSON object — no markdown, no prose, no
-   code fences. Raw JSON only.
-2. Every response MUST contain exactly these three keys:
-     "tool"      : one of the valid tool names listed below
-     "args"      : a JSON object of arguments for that tool (can be {})
-     "reasoning" : one sentence explaining why you chose this action
-3. Choose the most targeted, efficient action given the current phase and
-   findings. Do not repeat an action that was already taken with the same args.
-4. If you have no useful next action, emit HALT with a reason in "reasoning".
-5. Only emit REPORT when you have at least one confirmed vulnerability finding.
+1. Never repeat a tool+args combo already in recent actions.
+2. In ENUM: run curl_probe → whatweb → gobuster_dir → searchsploit (use short query e.g. "apache 2.4").
+3. In EXPLOIT: call msf_search FIRST (e.g. {"query":"apache"}), then use a module name from its results.
+4. Never invent Metasploit module names. Only use names returned by msf_search.
+5. Always use the correct port in URLs (e.g. http://IP:8080/ not http://IP/).
+6. If stuck with no valid action, emit HALT.
 
-VALID TOOLS AND THEIR ARGS:
-  nmap_scan        : {"target": "IP", "flags": "-sV -sC", "ports": "22,80"}
-  gobuster_dir     : {"url": "http://IP", "wordlist": "/path/to/list.txt"}
-  searchsploit     : {"query": "service version string"}
-  enum4linux       : {"target": "IP"}
-  curl_probe       : {"url": "http://IP/path", "flags": "-sI"}
-  whatweb          : {"url": "http://IP"}
-  msf_exploit      : {"module": "exploit/...", "options": {"RHOSTS": "IP"}}
-  shell_cmd        : {"cmd": "whoami", "session_id": 1}
-  linpeas          : {"session_id": 1}
-  add_finding      : {"title": "...", "severity": "critical|high|medium|low|info",
-                      "port": 80, "cvss": 9.8, "description": "...",
-                      "remediation": "..."}
-  add_note         : {"note": "free text observation"}
-  advance_phase    : {}
-  REPORT           : {}
-  HALT             : {}
+TOOLS:
+  nmap_scan     : {"target":"IP","flags":"-sV -sC"} — omit "ports" to scan all 65535 ports automatically
+  gobuster_dir  : {"url":"http://IP:PORT/","wordlist":"/usr/share/wordlists/dirb/common.txt"}
+  searchsploit  : {"query":"apache 2.4"}
+  enum4linux    : {"target":"IP"}
+  curl_probe    : {"url":"http://IP:PORT/","flags":"-sI"}
+  whatweb       : {"url":"http://IP:PORT/"}
+  msf_search    : {"query":"apache"}
+  msf_exploit   : {"module":"exploit/path/from/msf_search","options":{"RHOSTS":"IP","RPORT":8080}}
+  shell_cmd     : {"cmd":"whoami","session_id":1}
+  linpeas       : {"session_id":1}
+  add_finding   : {"title":"...","severity":"critical|high|medium|low|info","port":8080,"cvss":7.5,"description":"...","remediation":"..."}
+  add_note      : {"note":"..."}
+  advance_phase : {}
+  REPORT        : {}
+  HALT          : {}
 
-EXAMPLE (valid response):
-{"tool": "gobuster_dir", "args": {"url": "http://10.10.10.5", "wordlist": "/usr/share/wordlists/dirb/common.txt"}, "reasoning": "Port 80 is running Apache; directory enumeration may reveal admin panels or config files."}
+EXAMPLE:
+{"tool":"msf_search","args":{"query":"apache"},"reasoning":"Find real Metasploit module names for Apache before exploiting."}
 """).strip()
 
 
@@ -238,7 +246,8 @@ class LLMClient:
         """
         phase_hint = f"\nCurrent phase: {phase}" if phase else ""
         user_msg   = f"{context_summary}{phase_hint}\n\nWhat is your next action?"
-        return self.ask(user=user_msg)
+        temperature = PHASE_TEMPERATURE.get(phase, DEFAULT_TEMPERATURE)
+        return self.ask(user=user_msg, temperature=temperature)
 
     # ── Public: free-text generation (reporter mode) ──────────────────────────
 

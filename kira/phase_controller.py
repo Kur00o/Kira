@@ -2,7 +2,7 @@
 phase_controller.py — Kira Autonomous Penetration Testing Agent
 Defines what "done" means for each phase and what tools the LLM is allowed to pick.
 The planner reads phase focus text in every prompt — tight phase definitions
-stop Gemma from jumping to exploitation before it has finished enumerating.
+stop qwen2.5-coder:14b-instruct-q4_K_M from jumping to exploitation before it has finished enumerating.
 
 Usage:
     from phase_controller import PHASE_CRITERIA, get_phase_prompt, is_phase_complete, get_allowed_tools
@@ -15,11 +15,18 @@ Usage:
 PHASE_CRITERIA = {
     "RECON": {
         "complete_when": lambda s: len(s.get("open_ports", [])) > 0,
-        "focus": "Run nmap. Discover all open ports and service versions.",
+        "focus": "Run nmap on heavily used ports (22,25,53,80,443,8080,3128,4443,4444,8090,8443) to discover service versions.",
         "allowed_tools": ["nmap_scan", "add_note"],
     },
     "ENUM": {
-        "complete_when": lambda s: len(s.get("findings", [])) > 0,
+        "complete_when": lambda s: (
+            len(s.get("findings", [])) > 0
+            or len(s.get("web_paths", [])) > 0
+            or any(
+                a.get("tool") in ("searchsploit", "curl_probe", "whatweb", "enum4linux")
+                for a in s.get("actions_taken", [])
+            )
+        ),
         "focus": "Enumerate every service. Gobuster on HTTP. Check FTP anon, SMB.",
         "allowed_tools": [
             "gobuster_dir",
@@ -29,6 +36,7 @@ PHASE_CRITERIA = {
             "searchsploit",
             "add_finding",
             "add_note",
+            "advance_phase",
         ],
     },
     "VULN_SCAN": {
@@ -41,7 +49,7 @@ PHASE_CRITERIA = {
     "EXPLOIT": {
         "complete_when": lambda s: len(s.get("sessions", [])) > 0,
         "focus": "Run the highest-CVSS MSF module. Get a shell.",
-        "allowed_tools": ["msf_exploit", "shell_cmd", "add_note"],
+        "allowed_tools": ["msf_search", "msf_exploit", "shell_cmd", "add_note"],
     },
     "POST_EXPLOIT": {
         "complete_when": lambda s: s.get("is_root", False),
@@ -60,7 +68,7 @@ PHASE_ORDER = ["RECON", "ENUM", "VULN_SCAN", "EXPLOIT", "POST_EXPLOIT"]
 def get_phase_prompt(phase: str, state: dict) -> str:
     """
     Returns a focused instruction string injected into every LLM prompt.
-    Tells Gemma exactly what the current phase expects and what tools to use.
+    Tells qwen2.5-coder:14b-instruct-q4_K_M exactly what the current phase expects and what tools to use.
 
     Args:
         phase: current phase key e.g. "RECON"

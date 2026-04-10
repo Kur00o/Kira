@@ -15,7 +15,7 @@ Responsibilities:
 Usage:
     runner = ToolRunner(session_dir="./sessions/my_scan")
 
-    result = runner.nmap(target="10.10.10.5", flags="-sV -sC -p-")
+    result = runner.nmap(target="10.10.10.5", flags="-sV -sC", ports="22,443")
     result = runner.gobuster(url="http://10.10.10.5", wordlist="/usr/share/wordlists/dirb/common.txt")
     result = runner.run(["echo", "hello"])          # raw fallback
 
@@ -106,7 +106,7 @@ class ToolRunner:
     # Default timeouts (seconds) per tool class
     # Optimized for local environment with aggressive scanning
     TIMEOUTS = {
-        "nmap":       180,   # Fast -sV with --min-rate 2000
+        "nmap":       600,   # Full port sweep + version scan can take time
         "gobuster":   120,   # Directory brute-force
         "ffuf":       120,
         "searchsploit": 15,

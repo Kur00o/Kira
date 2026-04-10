@@ -83,8 +83,8 @@ class StateManager:
         summary = sm.get_context_summary()
     """
 
-    MAX_ACTIONS_IN_CONTEXT = 5   # last N actions fed to LLM
-    MAX_FINDINGS_IN_CONTEXT = 5  # top N scored findings fed to LLM
+    MAX_ACTIONS_IN_CONTEXT = 3   # last N actions fed to LLM
+    MAX_FINDINGS_IN_CONTEXT = 3  # top N scored findings fed to LLM
 
     def __init__(self, session_dir: str):
         self.session_dir = Path(session_dir)
