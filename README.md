@@ -29,21 +29,13 @@
 Target IP
    │
    ▼
-┌─────────┐    ┌──────────┐    ┌───────────┐    ┌─────────┐    ┌──────────────┐
-│  RECON  │───▶│   ENUM   │───▶│ VULN SCAN │───▶│ EXPLOIT │───▶│ POST EXPLOIT │
-│         │    │          │    │           │    │         │    │              │
-│ nmap    │    │ gobuster │    │searchsploit│   │   MSF   │    │   linpeas    │
-│ 65535   │    │ whatweb  │    │ CVE lookup │    │ modules │    │   privesc    │
-│  ports  │    │ curl     │    │ findings  │    │ shells  │    │    root      │
-└─────────┘    └──────────┘    └───────────┘    └─────────┘    └──────┬───────┘
-                                                                       │
-                                                                       ▼
-                                                               ┌──────────────┐
-                                                               │    REPORT    │
-                                                               │              │
-                                                               │  report.html │
-                                                               │  report.md   │
-                                                               └──────────────┘
+┌─────────┐      ┌──────────┐     ┌────────────┐     ┌─────────┐    ┌──────────────┐      ┌──────────────┐
+│  RECON  │ ───▶ │   ENUM   │───▶│ VULN SCAN  │───▶│ EXPLOIT │───▶│ POST EXPLOIT │───▶ │    REPORT    │
+│         │      │          │     │            │     │         │    │              │      │              │
+│ nmap    │      │ gobuster │     │searchsploit│     │   MSF   │    │   linpeas    │      │  report.html │
+│ 65535   │      │ whatweb  │     │ CVE lookup │     │ modules │    │   privesc    │      │  report.md   │
+│  ports  │      │ curl     │     │ findings   │     │ shells  │    │    root      │      └──────────────┘
+└─────────┘      └──────────┘     └────────────┘     └─────────┘    └──────────────┘
 ```
 
 Each phase is driven by an LLM (local Gemma or cloud Claude/GPT) that decides
@@ -90,7 +82,7 @@ ollama pull gemma3:4b
 > 💡 Better results with a larger model if you have the VRAM:
 > `ollama pull gemma3:12b` or `ollama pull qwen2.5-coder:14b`
 
-### Step 3 — Clone + Python deps
+### Step 3 — Clone + Python deps (Also within the code you will need to change to your localhost IP)
 
 ```bash
 git clone <repo-url> kira && cd kira
@@ -122,7 +114,7 @@ msfconsole --version && ollama list
 
 [DVWA](https://github.com/digininja/DVWA) (Damn Vulnerable Web Application) is
 the recommended target for testing Kira. It's intentionally vulnerable and safe
-to attack in a lab.
+to attack in a lab.(Target used for our testing)
 
 ### Docker (recommended — 30 seconds)
 
