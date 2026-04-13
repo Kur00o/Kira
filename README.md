@@ -17,8 +17,15 @@
 *LLM-driven agent that autonomously runs the full pentest lifecycle —*
 *recon → enum → vuln scan → exploit → privesc → report*
 
-> ⚠️ **Authorized environments only. Unauthorized use is illegal.**
+ ⚠️ **Authorized environments only. Unauthorized use is illegal.**
 
+</div>
+
+---
+<div align="center">
+   
+#### Read Documentation at <i>[Kira Documentation](https://kira-documentation.vercel.app/)</i>
+   
 </div>
 
 ---
