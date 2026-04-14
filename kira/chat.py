@@ -1,26 +1,36 @@
 """
-kira/chat.py — KiraChat Conversational Shell
-=============================================
-A conversational REPL layer wrapping the Planner, allowing users to:
-  - Ask questions about pentesting concepts and current findings
-  - Trigger autonomous scans by providing a target IP + trigger word
-  - Exit cleanly
+kira/chat.py — KiraChat
+========================
+Conversational REPL shell that wraps the existing Planner.
 
 Three modes:
-  1. CHAT        — User asks questions; LLM responds conversationally
-  2. SCAN_TRIGGER — User specifies target IP; Planner.run() executes autonomously
-  3. EXIT         — User types exit/quit; session ends cleanly
+  CHAT   — user asks security questions; LLM answers in plain English
+  SCAN   — user triggers autonomous scan; Planner.run() is called unchanged
+  EXIT   — user types exit/quit/bye; start() returns
+
+Rules strictly followed:
+  - Does NOT modify any existing module.
+  - Reuses the SAME LLMClient instance passed in from main.py.
+  - Calls Planner.run() as a black box — never reaches inside it.
+  - llm.ask() always returns a dict; _handle_chat() extracts the
+    'reasoning' field as the plain-text response.
+
+Usage (from main.py):
+    from kira.chat import KiraChat
+    KiraChat(planner=planner, state=state, llm=llm,
+             max_iter=args.max_iter, verbose=args.verbose).start()
 """
 
 import re
-from typing import Optional
+import time
+from pathlib import Path
 
-from kira.state import StateManager
-from kira.llm import LLMClient
-from kira.planner import Planner
-
-
-# ── Chat system prompt ────────────────────────────────────────────────────────
+# ── Chat system prompt ─────────────────────────────────────────────────────────
+# This prompt is used for conversational (non-scan) turns.
+# It overrides Kira's JSON-only persona to get a plain-English response.
+# We use add_note as the JSON vehicle and tell the model to put its full
+# answer inside the "reasoning" field — that field is then extracted and
+# printed as plain text.
 
 CHAT_SYSTEM_PROMPT = """You are Kira, an autonomous penetration testing agent and security expert.
 You help users understand penetration testing concepts, explain vulnerabilities,
@@ -31,280 +41,287 @@ Use it to give contextual, specific answers about THIS target and its findings.
 If no scan has been run yet, answer from general security knowledge.
 
 RULES:
-- Answer in plain conversational English. Never output JSON.
-- Keep answers under 200 words unless the user asks for detail.
+- Answer in plain conversational English. Never output JSON prose to the user.
+- You MUST reply in valid JSON with exactly these keys:
+    {"tool": "add_note", "args": {}, "reasoning": "<YOUR FULL ANSWER HERE>"}
+  Put your complete answer — including all explanation — inside the "reasoning"
+  field. The "tool" must always be "add_note" and "args" must always be {}.
+- Keep answers under 200 words unless the user explicitly asks for more detail.
 - Only reference findings, ports, or vulnerabilities that appear in the
   session state. Do not invent findings that are not there.
 - If the user asks you to start a scan, tell them to say
   'start scan on TARGET_IP' or just provide the IP with a trigger word.
 - You may explain CVEs, attack techniques, remediation steps, and security
   concepts freely from your training knowledge.
-- Be direct and technically precise. Assume the user is a security professional."""
+- Be direct and technically precise. Assume the user is a security professional.
+- Do NOT start your reasoning with "reasoning:" or any JSON key name."""
 
 
-# ── ANSI colours ──────────────────────────────────────────────────────────────
-# Minimal colour support for KiraChat
+# ── Scan trigger words ─────────────────────────────────────────────────────────
 
-class C:
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    CYAN = "\033[96m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RESET = "\033[0m"
+_TRIGGER_WORDS = {
+    "start", "scan", "hack", "test", "pentest",
+    "find", "attack", "enumerate", "exploit", "recon",
+    "run", "begin", "check", "target",
+}
+
+_TRIGGER_PHRASES = {
+    "start scan", "begin scan", "run scan", "start pentest",
+    "find vulnerabilities", "find vulns", "start hacking",
+    "run kira", "start kira", "begin pentest",
+}
+
+_EXIT_WORDS = {"exit", "quit", "bye", "done", "q", ":q"}
+
+_IPV4_RE = re.compile(
+    r"\b((?:25[0-5]|2[0-4]\d|[01]?\d\d?)\."
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\."
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\."
+    r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?))\b"
+)
 
 
 # ── KiraChat ───────────────────────────────────────────────────────────────────
 
 class KiraChat:
     """
-    Conversational shell wrapping Planner.
-    Supports chat mode (question answering), scan triggers, and exit.
+    Conversational REPL shell layered on top of the existing Planner.
+
+    Parameters
+    ----------
+    planner  : existing Planner instance from main.py
+    state    : existing StateManager instance
+    llm      : existing LLMClient instance — REUSED, not re-created
+    max_iter : passed from args.max_iter
+    verbose  : passed from args.verbose
     """
 
-    EXIT_KEYWORDS = {"exit", "quit", "bye", "done", "q", ":q"}
+    def __init__(self, planner, state, llm, max_iter: int = 50, verbose: bool = True):
+        self._planner  = planner
+        self._state    = state
+        self._llm      = llm
+        self._max_iter = max_iter
+        self._verbose  = verbose
 
-    def __init__(
-        self,
-        planner: Planner,
-        state: StateManager,
-        llm: LLMClient,
-        max_iter: int = 50,
-        verbose: bool = True,
-    ):
-        """
-        Initialize KiraChat.
-
-        Parameters
-        ----------
-        planner : Planner
-            Existing Planner instance from main.py
-        state : StateManager
-            Existing StateManager instance
-        llm : LLMClient
-            Existing LLMClient instance (reused — no new connection)
-        max_iter : int
-            Maximum iterations to pass to planner.run()
-        verbose : bool
-            Enable verbose output
-        """
-        self.planner = planner
-        self.state = state
-        self.llm = llm
-        self.max_iter = max_iter
-        self.verbose = verbose
+    # ── Public ────────────────────────────────────────────────────────────────
 
     def start(self) -> None:
         """
         Main REPL loop. Runs until user exits.
-        Three modes: CHAT, SCAN_TRIGGER, EXIT.
+        Prints welcome banner, then loops:
+          1. Print "kira> " prompt
+          2. Read user input
+          3. Route to _handle_chat(), _handle_scan_trigger(), or exit
         """
-        self._print_welcome()
+        self._print_banner()
 
         while True:
             try:
-                user_input = input(f"{C.CYAN}kira> {C.RESET}").strip()
-            except EOFError:
-                # Ctrl+D or end of input stream
-                break
-            except KeyboardInterrupt:
-                # Ctrl+C
-                print()
+                user_input = input("\nkira> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                # Ctrl+D or Ctrl+C at the prompt — clean exit
                 self._print_goodbye()
-                break
+                return
 
             if not user_input:
                 continue
 
-            # Route based on input type
-            if user_input.lower() in self.EXIT_KEYWORDS:
+            lower = user_input.lower().strip()
+
+            # ── Exit ──────────────────────────────────────────────────────────
+            if lower in _EXIT_WORDS:
                 self._print_goodbye()
-                break
-            elif self._is_scan_trigger(user_input):
+                return
+
+            # ── Scan trigger ──────────────────────────────────────────────────
+            if self._is_scan_trigger(user_input):
                 self._handle_scan_trigger(user_input)
-            else:
-                self._handle_chat(user_input)
+                continue
+
+            # ── Chat ──────────────────────────────────────────────────────────
+            self._handle_chat(user_input)
+
+    # ── Trigger detection ─────────────────────────────────────────────────────
 
     def _is_scan_trigger(self, message: str) -> bool:
         """
-        Detect if message should trigger a scan.
+        Returns True if message should kick off planner.run().
 
-        Returns True if:
-          - Message contains an IPv4 address AND a trigger word, OR
-          - Message contains an exact trigger phrase
+        Matches either:
+          (a) an IPv4 address + at least one trigger word, OR
+          (b) an exact trigger phrase anywhere in the message
         """
-        msg_lower = message.lower()
+        lower = message.lower()
 
-        # Exact phrase triggers
-        exact_phrases = [
-            "start scan",
-            "begin scan",
-            "run scan",
-            "start pentest",
-            "find vulnerabilities",
-            "find vulns",
-            "start hacking",
-            "run kira",
-            "start kira",
-            "begin pentest",
-        ]
-        for phrase in exact_phrases:
-            if phrase in msg_lower:
+        # Check exact trigger phrases first
+        for phrase in _TRIGGER_PHRASES:
+            if phrase in lower:
                 return True
 
-        # IPv4 + trigger word pattern
-        ip_pattern = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
-        trigger_words = [
-            "start",
-            "scan",
-            "hack",
-            "test",
-            "pentest",
-            "find",
-            "attack",
-            "enumerate",
-            "exploit",
-            "recon",
-            "run",
-            "begin",
-            "check",
-            "target",
-        ]
-
-        ip_match = re.search(ip_pattern, message)
-        if ip_match:
-            has_trigger = any(word in msg_lower for word in trigger_words)
-            if has_trigger:
+        # Check IP + trigger word combination
+        if _IPV4_RE.search(message):
+            words = set(re.findall(r"[a-z]+", lower))
+            if words & _TRIGGER_WORDS:
                 return True
 
         return False
 
-    def _extract_ip(self, message: str) -> Optional[str]:
-        """
-        Extract first IPv4 address from message.
-        Returns None if no IP found.
-        """
-        ip_pattern = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
-        match = re.search(ip_pattern, message)
-        return match.group(0) if match else None
+    def _extract_ip(self, message: str) -> str | None:
+        """Extracts the first IPv4 address from message, or None."""
+        match = _IPV4_RE.search(message)
+        return match.group(1) if match else None
 
-    def _build_chat_prompt(self, user_message: str) -> str:
-        """
-        Build the full user-turn content for a chat call.
-        Includes session context summary + user message.
-        """
-        context = self.state.get_context_summary()
-        separator = "\n" + "=" * 50 + "\nUSER QUESTION:\n"
-        return context + separator + user_message
+    # ── Chat handler ──────────────────────────────────────────────────────────
 
     def _handle_chat(self, message: str) -> None:
         """
-        Chat mode: Call LLM with user question + state context.
-        Print response as plain text.
+        Call llm.ask() with CHAT_SYSTEM_PROMPT and the current context.
+        Extract the 'reasoning' field from the dict response and print
+        it as plain text. Never crashes on unexpected response shapes.
         """
-        full_prompt = self._build_chat_prompt(message)
+        user_turn = self._build_chat_prompt(message)
 
         try:
-            # Use generate_text for free-form mode instead of ask() (which is JSON mode)
-            response = self.llm.generate_text(
-                prompt=full_prompt,
-                temperature=0.3,
-                max_tokens=300,
+            action = self._llm.ask(
+                user=user_turn,
+                system=CHAT_SYSTEM_PROMPT,
+                temperature=0.4,   # slightly higher than planner for natural prose
             )
+        except Exception as exc:
+            self._print_kira(f"Sorry, I couldn't reach the LLM right now: {exc}")
+            return
 
-            if response:
-                print(f"{C.GREEN}[KIRA]{C.RESET} {response}\n")
-            else:
-                print(f"{C.YELLOW}[KIRA]{C.RESET} I couldn't generate a response. Try again.\n")
+        # action is always a dict — extract plain-text answer from 'reasoning'
+        if isinstance(action, dict):
+            response = (
+                action.get("reasoning")
+                or action.get("response")
+                or action.get("content")
+                or str(action)
+            )
+        else:
+            response = str(action)
 
-        except Exception as e:
-            print(f"{C.YELLOW}[KIRA]{C.RESET} Error: {e}\n")
+        # Strip any JSON-like wrapper the model might have leaked
+        response = response.strip()
+        if response.startswith('"') and response.endswith('"'):
+            response = response[1:-1]
+
+        self._print_kira(response)
+
+    # ── Scan handler ──────────────────────────────────────────────────────────
 
     def _handle_scan_trigger(self, message: str) -> None:
         """
-        Scan mode: Extract IP, update target if needed, run planner, return to chat.
+        Extracts IP if present, updates state target if needed,
+        calls planner.run(), prints result summary, then returns
+        to chat mode — does NOT exit.
         """
         extracted_ip = self._extract_ip(message)
 
+        # If a new IP was mentioned, update state target
         if extracted_ip:
-            current_target = self.state.target
+            current_target = self._state.get("target")
             if current_target != extracted_ip:
-                # Re-init state for new target
-                print(
-                    f"{C.YELLOW}[KIRA]{C.RESET} Target changed from "
-                    f"{current_target} to {extracted_ip}. Resetting state.\n"
-                )
-                self.state.init(target=extracted_ip, authorized_by=self.state.get("authorized_by"))
-            target = extracted_ip
-        else:
-            # Use current state target
-            target = self.state.target
-            if not target:
-                print(
-                    f"{C.YELLOW}[KIRA]{C.RESET} No IP found in message. "
-                    f"Please provide a target IP (e.g., 'start scan on 10.10.10.5').\n"
-                )
-                return
+                try:
+                    self._state.update(target=extracted_ip)
+                except Exception:
+                    # If state doesn't support updating target mid-session,
+                    # log and continue — Planner will use what's in state
+                    pass
 
-        # Confirmation
-        print(f"{C.GREEN}[KIRA]{C.RESET} Understood. Starting autonomous scan on {target}...")
-        print(f"{C.DIM}       You can interrupt with Ctrl+C at any time.{C.RESET}\n")
+        target = self._state.get("target") or extracted_ip or "unknown"
 
-        # Run the planner synchronously
+        print(f"\n[KIRA] Understood. Starting autonomous scan on {target}...")
+        print(f"[KIRA] You can interrupt with Ctrl+C at any time.\n")
+
+        t_start = time.monotonic()
+        outcome = "ERROR"
+
         try:
-            outcome = self.planner.run(max_iterations=self.max_iter)
+            outcome = self._planner.run(max_iterations=self._max_iter)
         except KeyboardInterrupt:
             outcome = "INTERRUPTED"
-            print(f"\n{C.YELLOW}[KIRA]{C.RESET} Interrupted by user.\n")
+            print(f"\n[KIRA] Scan interrupted by user.")
+        except Exception as exc:
+            outcome = "ERROR"
+            print(f"\n[KIRA] Scan error: {exc}")
+            if self._verbose:
+                import traceback
+                traceback.print_exc()
 
-        # Print session summary
-        print(f"\n{C.GREEN}[KIRA]{C.RESET} Session ended: {outcome}\n")
-        self._print_session_summary()
+        elapsed = time.monotonic() - t_start
 
-        # Return to chat mode
-        print()
+        # Print outcome
+        outcome_labels = {
+            "DONE":        "Scan complete.",
+            "ROOT":        "Root obtained — scan complete.",
+            "HALTED":      "Agent halted (see reasoning above).",
+            "MAX_ITER":    f"Max iterations reached.",
+            "INTERRUPTED": "Scan interrupted.",
+            "ERROR":       "Scan encountered an error.",
+        }
+        label = outcome_labels.get(outcome, outcome)
+        print(f"\n[KIRA] Session ended: {outcome} — {label}")
 
-    def _print_session_summary(self) -> None:
-        """Print a compact summary of the session after scan completes."""
-        findings = self.state.get("findings") or []
-        ports = self.state.get("open_ports") or []
-        sessions = self.state.get("sessions") or []
-        is_root = self.state.get("is_root", False)
-        phase = self.state.get("phase", "?")
+        # Print session summary using the shared helper from main
+        try:
+            from main import _print_session_summary
+            session_dir = Path(self._state.session_dir)
+            _print_session_summary(self._state, session_dir, elapsed)
+        except Exception:
+            # Fallback if import fails — print a minimal summary
+            findings = self._state.get("findings") or []
+            ports    = self._state.get("open_ports") or []
+            print(f"  Open ports : {len(ports)}   Findings: {len(findings)}   Elapsed: {elapsed:.0f}s")
 
-        sev_counts: dict[str, int] = {}
-        for f in findings:
-            sev = f.get("severity", "info")
-            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        # Prompt the user to ask questions
+        print(f"\n[KIRA] You can now ask me questions about the findings.")
+        print(f"       Try: 'explain the findings' or 'what should I fix first?'")
 
-        print(f"  Phase          {phase}")
-        print(f"  Root obtained  {'YES ✓' if is_root else 'no'}")
-        print(f"  Sessions open  {len(sessions)}")
-        print(f"  Open ports     {len(ports)}")
-        print(f"  Findings       {len(findings)}  " + "  ".join(
-            f"{k}:{v}" for k, v in sev_counts.items()
-        ))
+    # ── Prompt builder ────────────────────────────────────────────────────────
 
-        if findings:
-            print(f"\n  {C.BOLD}Top findings:{C.RESET}")
-            for f in sorted(findings, key=lambda x: x.get("cvss", 0), reverse=True)[:5]:
-                sev = f.get("severity", "info").upper()
-                print(
-                    f"    [{sev:8s}] CVSS {f.get('cvss', '?'):<4}  "
-                    f"port {f.get('port', '?'):<5}  {f.get('title', 'untitled')}"
-                )
+    def _build_chat_prompt(self, user_message: str) -> str:
+        """
+        Returns the full user-turn content:
+          <context summary>
+          ---
+          User question: <user_message>
+        """
+        context = self._state.get_context_summary()
+        return (
+            f"CURRENT SESSION STATE:\n"
+            f"{context}\n"
+            f"---\n"
+            f"User question: {user_message}"
+        )
 
-    def _print_welcome(self) -> None:
-        """Print welcome banner."""
-        target = self.state.target or "(none)"
-        print()
-        print(f"{C.BOLD}┌{'─' * 57}┐{C.RESET}")
-        print(f"{C.BOLD}│  Kira v0.3.0 — Autonomous Pentest Agent{' ' * 16}│{C.RESET}")
-        print(f"{C.BOLD}│  Type a target IP + trigger word to start scanning.{' ' * 3}│{C.RESET}")
-        print(f"{C.BOLD}│  Ask me anything about pentesting. Type 'exit' to quit. │{C.RESET}")
-        print(f"{C.BOLD}└{'─' * 57}┘{C.RESET}")
-        print()
+    # ── Display helpers ───────────────────────────────────────────────────────
+
+    def _print_kira(self, message: str) -> None:
+        """Print a Kira response with the [KIRA] prefix."""
+        print(f"[KIRA] {message}")
+
+    def _print_banner(self) -> None:
+        """Print the chat welcome banner."""
+        try:
+            from rich.console import Console
+            from rich.panel   import Panel
+            c = Console()
+            c.print(Panel(
+                "[bold]Kira v0.3.0[/bold] — Autonomous Pentest Agent\n"
+                "[dim]Type a target IP + trigger word to start scanning.[/dim]\n"
+                "[dim]Ask me anything about pentesting. Type 'exit' to quit.[/dim]",
+                border_style="dim",
+                expand=False,
+            ))
+        except ImportError:
+            print("┌─────────────────────────────────────────────────────────┐")
+            print("│  Kira v0.3.0 — Autonomous Pentest Agent                 │")
+            print("│  Type a target IP + trigger word to start scanning.     │")
+            print("│  Ask me anything about pentesting. Type 'exit' to quit. │")
+            print("└─────────────────────────────────────────────────────────┘")
 
     def _print_goodbye(self) -> None:
-        """Print goodbye message."""
-        print(f"{C.GREEN}[KIRA]{C.RESET} Session ended. Stay authorized.\n")
+        """Print the exit message."""
+        print("\n[KIRA] Session ended. Stay authorized.")
