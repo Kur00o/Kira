@@ -85,23 +85,100 @@ _IPV4_RE = re.compile(
 
 class KiraChat:
     """
-    Conversational REPL shell layered on top of the existing Planner.
+    Conversational REPL shell for Kira.
+    Handles chat, target discovery from user input, and scan triggering.
+    Lazily initializes state and planner when target is provided.
 
     Parameters
     ----------
-    planner  : existing Planner instance from main.py
-    state    : existing StateManager instance
-    llm      : existing LLMClient instance — REUSED, not re-created
-    max_iter : passed from args.max_iter
-    verbose  : passed from args.verbose
+    runner   : ToolRunner instance
+    llm      : LLMClient instance
+    msf      : MSF client or None
+    kb       : KnowledgeBase or None
+    session_dir : Path to session directory
+    log      : KiraLogger instance
+    authorized_by : Authorization string
+    max_iter : max iterations per scan
+    verbose  : verbose output
+    initial_target : optional target from --target CLI arg
+    no_report : skip report generation
     """
 
-    def __init__(self, planner, state, llm, max_iter: int = 50, verbose: bool = True):
-        self._planner  = planner
-        self._state    = state
-        self._llm      = llm
+    def __init__(
+        self,
+        runner,
+        llm,
+        msf,
+        kb,
+        session_dir,
+        log,
+        authorized_by,
+        max_iter: int = 50,
+        verbose: bool = True,
+        initial_target: str = None,
+        no_report: bool = False,
+    ):
+        self._runner = runner
+        self._llm = llm
+        self._msf = msf
+        self._kb = kb
+        self._session_dir = session_dir
+        self._log = log
+        self._authorized_by = authorized_by
         self._max_iter = max_iter
-        self._verbose  = verbose
+        self._verbose = verbose
+        self._no_report = no_report
+        
+        # State and planner initialized lazily when target is discovered
+        self._state = None
+        self._planner = None
+        self._guard = None
+        
+        # If target provided via CLI, initialize immediately
+        if initial_target:
+            self._init_for_target(initial_target)
+
+    # ── Initialization ────────────────────────────────────────────────────────
+
+    def _init_for_target(self, target: str) -> None:
+        """
+        Initialize state, planner, and guard for a given target.
+        Called when target is discovered (either from CLI or chat).
+        """
+        from kira.state import StateManager
+        from kira.planner import Planner
+        from kira.guardrails import ScopeGuard
+        
+        # Initialize state for this target
+        self._state = StateManager(session_dir=str(self._session_dir))
+        self._state.init(target=target, authorized_by=self._authorized_by)
+        self._log.info(f"Target set: {target}")
+        
+        # Scope guard
+        self._guard = ScopeGuard(authorized_target=target, authorized_by=self._authorized_by)
+        self._guard.validate_startup(self._log)
+        
+        # Phase transition logger hook
+        _orig_advance = self._state.advance_phase
+        def _logged_advance():
+            old = self._state.phase
+            new = _orig_advance()
+            if new != old:
+                self._log.phase(old, new)
+            return new
+        self._state.advance_phase = _logged_advance
+        
+        # Create planner
+        self._planner = Planner(
+            state=self._state,
+            runner=self._runner,
+            llm=self._llm,
+            msf=self._msf,
+            kb=self._kb,
+            verbose=True,
+            logger=self._log,
+            guard=self._guard,
+        )
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -171,6 +248,49 @@ class KiraChat:
         match = _IPV4_RE.search(message)
         return match.group(1) if match else None
 
+    def _extract_iterations(self, message: str) -> int | None:
+        """
+        Extracts iteration count from message.
+        Looks for patterns like:
+          - "scan 10.10.10.5 for 15 iterations"
+          - "scan 10.10.10.5 with 20 iterations"
+          - "scan 10.10.10.5 in 30 steps"
+          - "scan 10.10.10.5 25"
+        Returns the number, or None if not found.
+        """
+        lower = message.lower()
+        
+        # Pattern: "for/with/in NUMBER (iterations/steps/rounds/times)"
+        patterns = [
+            r"(?:for|with|in)\s+(\d+)\s*(?:iterations?|steps?|rounds?|times?)?",
+            r"(?:iterations?|steps?|rounds?|times?)\s+(\d+)",
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, lower)
+            if match:
+                try:
+                    return int(match.group(1))
+                except (ValueError, IndexError):
+                    pass
+        
+        # Also check for a bare number at the end (e.g., "scan 10.10.10.5 25")
+        # But only if there's an IP in the message (to avoid false positives)
+        if _IPV4_RE.search(message):
+            numbers = re.findall(r"\b(\d+)\b", message)
+            # Filter out IP octets (numbers that appear in the IP)
+            ip_octets = set()
+            for ip_match in _IPV4_RE.finditer(message):
+                ip = ip_match.group(1)
+                ip_octets.update(ip.split("."))
+            
+            for num_str in reversed(numbers):  # Check from end of message
+                num = int(num_str)
+                if num_str not in ip_octets and 1 <= num <= 1000:
+                    return num
+        
+        return None
+
     # ── Chat handler ──────────────────────────────────────────────────────────
 
     def _handle_chat(self, message: str) -> None:
@@ -213,33 +333,60 @@ class KiraChat:
 
     def _handle_scan_trigger(self, message: str) -> None:
         """
-        Extracts IP if present, updates state target if needed,
-        calls planner.run(), prints result summary, then returns
-        to chat mode — does NOT exit.
+        Extracts IP and iteration count from message, initializes target if new,
+        calls planner.run(), prints result summary, returns to chat mode.
         """
         extracted_ip = self._extract_ip(message)
 
-        # If a new IP was mentioned, update state target
+        # Determine which target to use
         if extracted_ip:
-            current_target = self._state.get("target")
-            if current_target != extracted_ip:
-                try:
-                    self._state.update(target=extracted_ip)
-                except Exception:
-                    # If state doesn't support updating target mid-session,
-                    # log and continue — Planner will use what's in state
-                    pass
+            target = extracted_ip
+        elif self._state:
+            target = self._state.target
+        else:
+            self._print_kira("No target IP found in your message. Please specify one (e.g., '10.10.10.5 for 15 iterations').")
+            return
 
-        target = self._state.get("target") or extracted_ip or "unknown"
+        # Extract iteration count from message, or ask user
+        max_iterations = self._extract_iterations(message)
+        
+        if max_iterations is None:
+            # Prompt user for iteration count
+            try:
+                print()  # Blank line for readability
+                iter_input = input(f"[KIRA] How many iterations? (default {self._max_iter}): ").strip()
+                if iter_input:
+                    try:
+                        max_iterations = int(iter_input)
+                        if max_iterations < 1:
+                            max_iterations = self._max_iter
+                            self._print_kira(f"Invalid input. Using default {self._max_iter} iterations.")
+                    except ValueError:
+                        max_iterations = self._max_iter
+                        self._print_kira(f"Invalid number. Using default {self._max_iter} iterations.")
+                else:
+                    max_iterations = self._max_iter
+            except (EOFError, KeyboardInterrupt):
+                self._print_kira("Scan cancelled.")
+                return
+
+        # Initialize target if not already done
+        if not self._state or self._state.target != target:
+            try:
+                self._init_for_target(target)
+            except Exception as e:
+                self._print_kira(f"Failed to initialize target {target}: {e}")
+                return
 
         print(f"\n[KIRA] Understood. Starting autonomous scan on {target}...")
+        print(f"[KIRA] Max iterations: {max_iterations}")
         print(f"[KIRA] You can interrupt with Ctrl+C at any time.\n")
 
         t_start = time.monotonic()
         outcome = "ERROR"
 
         try:
-            outcome = self._planner.run(max_iterations=self._max_iter)
+            outcome = self._planner.run(max_iterations=max_iterations)
         except KeyboardInterrupt:
             outcome = "INTERRUPTED"
             print(f"\n[KIRA] Scan interrupted by user.")
@@ -267,13 +414,22 @@ class KiraChat:
         # Print session summary using the shared helper from main
         try:
             from main import _print_session_summary
-            session_dir = Path(self._state.session_dir)
-            _print_session_summary(self._state, session_dir, elapsed)
+            _print_session_summary(self._state, self._session_dir, elapsed)
         except Exception:
             # Fallback if import fails — print a minimal summary
             findings = self._state.get("findings") or []
             ports    = self._state.get("open_ports") or []
             print(f"  Open ports : {len(ports)}   Findings: {len(findings)}   Elapsed: {elapsed:.0f}s")
+
+        # Offer report generation
+        if not self._no_report:
+            from main import run_report
+            finding_count = len(self._state.get("findings", []))
+            if outcome in ("DONE", "ROOT") or (outcome == "MAX_ITER" and finding_count > 0):
+                try:
+                    run_report(self._session_dir, self._llm, self._log, outcome, finding_count)
+                except Exception as e:
+                    print(f"[KIRA] Report generation failed: {e}")
 
         # Prompt the user to ask questions
         print(f"\n[KIRA] You can now ask me questions about the findings.")
@@ -283,12 +439,14 @@ class KiraChat:
 
     def _build_chat_prompt(self, user_message: str) -> str:
         """
-        Returns the full user-turn content:
-          <context summary>
-          ---
-          User question: <user_message>
+        Returns the full user-turn content with optional context.
+        If no scan has been run yet, uses general knowledge mode.
         """
-        context = self._state.get_context_summary()
+        if self._state:
+            context = self._state.get_context_summary()
+        else:
+            context = "No active target or scan yet."
+
         return (
             f"CURRENT SESSION STATE:\n"
             f"{context}\n"

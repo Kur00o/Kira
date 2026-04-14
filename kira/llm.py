@@ -1,23 +1,10 @@
 """
-kira/llm.py — LLM Interface  (Day 4 update)
-=============================================
-All communication with the LLM flows here.
-
-Day 4 additions:
-  - Multi-provider support: Ollama | Anthropic | OpenAI
-  - generate_text() for free-text reporter prompts (non-JSON mode)
-  - Switching providers is a one-line config change (PROVIDER = "...")
+kira/llm.py — LLM Interface (Gemini-only)
+==========================================
+All communication with the LLM flows through Google Gemini.
 
 Usage:
-    # Local Ollama (default)
-    llm = LLMClient()
-
-    # Anthropic Claude
-    llm = LLMClient(provider="anthropic", api_key="sk-ant-...")
-    # or: export ANTHROPIC_API_KEY=sk-ant-... then LLMClient(provider="anthropic")
-
-    # OpenAI
-    llm = LLMClient(provider="openai", api_key="sk-...")
+    llm = LLMClient()    # Pulls GOOGLE_API_KEY from .env or environment
 
     # Planner action (JSON mode):
     action = llm.next_action(context_summary, phase="ENUM")
@@ -37,23 +24,11 @@ from typing import Optional
 import requests
 
 
-# ── Provider configuration ────────────────────────────────────────────────────
-# Switch LLM backend by changing PROVIDER.
-# Supported: "ollama" | "anthropic" | "openai"
+# ── Gemini configuration ──────────────────────────────────────────────────────
 
-PROVIDER        = "ollama"           # ← change this to switch backends
-
-# Ollama (local)
-OLLAMA_HOST     = "http://localhost:11434"
-OLLAMA_MODEL    = "gemma3:4b"
-
-# Anthropic Claude (cloud)
-ANTHROPIC_KEY   = ""                 # or: export ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-
-# OpenAI (cloud)
-OPENAI_KEY      = ""                 # or: export OPENAI_API_KEY=sk-...
-OPENAI_MODEL    = "gpt-4o-mini"
+GEMINI_API_KEY  = ""                 # Loaded from GOOGLE_API_KEY env var
+GEMINI_MODEL    = "gemini-2.5-flash"
+GEMINI_HOST     = "https://generativelanguage.googleapis.com"
 
 # Google Gemini (cloud)
 GEMINI_KEY      = ""                 # or: export GEMINI_API_KEY=...
@@ -142,72 +117,35 @@ No markdown. No prose. No code fences. Just the JSON object.
 
 class LLMClient:
     """
-    Unified LLM wrapper. Supports Ollama, Anthropic, and OpenAI.
+    Google Gemini LLM client for Kira autonomous penetration testing.
 
     Parameters
     ----------
-    provider : "ollama" | "anthropic" | "openai"  (default: PROVIDER constant)
-    host     : Ollama server URL (Ollama only)
-    model    : override model tag
-    api_key  : API key (Anthropic / OpenAI); falls back to env var
-    timeout  : HTTP timeout in seconds
-    verbose  : print each call's latency and token count
+    model   : override model tag (default: GEMINI_MODEL)
+    api_key : API key; falls back to GOOGLE_API_KEY env var
+    timeout : HTTP timeout in seconds
+    verbose : print each call's latency and token count
     """
 
     def __init__(
         self,
-        host:     str  = None,
-        model:    str  = None,
-        provider: str  = None,
-        api_key:  str  = None,
-        timeout:  int  = DEFAULT_TIMEOUT,
-        verbose:  bool = True,
+        model:   str  = None,
+        api_key: str  = None,
+        timeout: int  = DEFAULT_TIMEOUT,
+        verbose: bool = True,
     ):
-        self.provider = (provider or PROVIDER).lower()
-        self.timeout  = timeout
-        self.verbose  = verbose
+        self.provider = "gemini"
+        self.host    = GEMINI_HOST
+        self.model   = model or GEMINI_MODEL
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY", GEMINI_API_KEY)
+        self.timeout = timeout
+        self.verbose = verbose
         self._call_log: list[dict] = []
 
-        if self.provider == "ollama":
-            self.host    = (host or OLLAMA_HOST).rstrip("/")
-            self.model   = model or OLLAMA_MODEL
-            self.api_key = None
-
-        elif self.provider == "anthropic":
-            self.host    = "https://api.anthropic.com"
-            self.model   = model or ANTHROPIC_MODEL
-            self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
-            if not self.api_key:
-                raise ValueError(
-                    "Anthropic provider requires an API key. "
-                    "Pass api_key= or set ANTHROPIC_API_KEY environment variable."
-                )
-
-        elif self.provider == "openai":
-            self.host    = "https://api.openai.com"
-            self.model   = model or OPENAI_MODEL
-            self.api_key = api_key or os.getenv("OPENAI_API_KEY", OPENAI_KEY)
-            if not self.api_key:
-                raise ValueError(
-                    "OpenAI provider requires an API key. "
-                    "Pass api_key= or set OPENAI_API_KEY environment variable."
-                )
-
-        elif self.provider == "gemini":
-            self.host    = "https://generativelanguage.googleapis.com"
-            self.model   = model or GEMINI_MODEL
-            self.api_key = api_key or os.getenv("GEMINI_API_KEY", GEMINI_KEY)
-            if not self.api_key:
-                raise ValueError(
-                    "Gemini provider requires an API key. "
-                    "Pass api_key= or set GEMINI_API_KEY environment variable. "
-                    "Get one free at: https://aistudio.google.com/apikey"
-                )
-
-        else:
+        if not self.api_key:
             raise ValueError(
-                f"Unknown provider '{self.provider}'. "
-                "Supported: ollama | anthropic | openai | gemini"
+                "Gemini requires an API key. "
+                "Pass api_key= or set GOOGLE_API_KEY environment variable."
             )
 
     # ── Public: structured action (JSON mode) ─────────────────────────────────
@@ -287,78 +225,30 @@ class LLMClient:
         -------
         str : raw model response, stripped of leading/trailing whitespace
         """
-        if self.provider == "ollama":
-            return self._generate_text_ollama(prompt, temperature, max_tokens)
-        elif self.provider == "anthropic":
-            return self._generate_text_anthropic(prompt, temperature, max_tokens)
-        elif self.provider == "openai":
-            return self._generate_text_openai(prompt, temperature, max_tokens)
-        elif self.provider == "gemini":
-            return self._generate_text_gemini(prompt, temperature, max_tokens)
-        return ""
-
-    def _generate_text_ollama(self, prompt: str, temperature: float, max_tokens: int) -> str:
         payload = {
-            "model":    self.model,
-            "stream":   False,
-            "options":  {"temperature": temperature, "num_predict": max_tokens},
-            "messages": [{"role": "user", "content": prompt}],
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature":  temperature,
+                "maxOutputTokens": max_tokens,
+            },
         }
         try:
             resp = requests.post(
-                f"{self.host}/api/chat",
+                f"{self.host}/v1beta/models/{self.model}:generateContent",
+                params={"key": self.api_key},
                 json=payload,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            return resp.json().get("message", {}).get("content", "").strip()
-        except Exception:
-            return ""
-
-    def _generate_text_anthropic(self, prompt: str, temperature: float, max_tokens: int) -> str:
-        headers = {
-            "x-api-key":         self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type":      "application/json",
-        }
-        payload = {
-            "model":       self.model,
-            "max_tokens":  max_tokens,
-            "temperature": temperature,
-            "messages":    [{"role": "user", "content": prompt}],
-        }
-        try:
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()["content"][0]["text"].strip()
-        except Exception:
-            return ""
-
-    def _generate_text_openai(self, prompt: str, temperature: float, max_tokens: int) -> str:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type":  "application/json",
-        }
-        payload = {
-            "model":       self.model,
-            "max_tokens":  max_tokens,
-            "temperature": temperature,
-            "messages":    [{"role": "user", "content": prompt}],
-        }
-        try:
-            resp = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            data = resp.json()
+            # Extract text from Gemini response
+            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            return text.strip()
         except Exception:
             return ""
 
@@ -387,204 +277,113 @@ class LLMClient:
 
     def ping(self) -> tuple[bool, str]:
         """
-        Quick connectivity check.
+        Quick connectivity check for Gemini API.
+        Makes a minimal generateContent request to verify API key and model work.
         Returns (True, model_name) or (False, error_message).
         """
-        if self.provider == "ollama":
-            try:
-                resp = requests.get(f"{self.host}/api/tags", timeout=5)
-                resp.raise_for_status()
-                models = resp.json().get("models", [])
-                names  = [m.get("name", "") for m in models]
-                if self.model not in names:
-                    return False, (
-                        f"Model '{self.model}' not pulled. "
-                        f"Run: ollama pull {self.model}. "
-                        f"Available: {names}"
+        try:
+            payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": "ok"}],
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 10,
+                },
+            }
+            resp = requests.post(
+                f"{self.host}/v1beta/models/{self.model}:generateContent",
+                params={"key": self.api_key},
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code == 404:
+                # Try listing available models to give better error
+                try:
+                    list_resp = requests.get(
+                        f"{self.host}/v1beta/models",
+                        params={"key": self.api_key},
+                        timeout=10,
                     )
-                return True, self.model
-            except requests.exceptions.ConnectionError:
-                return False, (
-                    f"Cannot connect to Ollama at {self.host}. "
-                    "Is Ollama running? Run: ollama serve"
-                )
-            except Exception as e:
-                return False, str(e)
-
-        elif self.provider == "anthropic":
-            try:
-                resp = requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key":         self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type":      "application/json",
-                    },
-                    json={"model": self.model, "max_tokens": 5,
-                          "messages": [{"role": "user", "content": "ping"}]},
-                    timeout=10,
-                )
-                resp.raise_for_status()
-                return True, self.model
-            except Exception as e:
-                return False, str(e)
-
-        elif self.provider == "openai":
-            try:
-                resp = requests.get(
-                    "https://api.openai.com/v1/models",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=10,
-                )
-                resp.raise_for_status()
-                return True, self.model
-            except Exception as e:
-                return False, str(e)
-
-        elif self.provider == "gemini":
-            try:
-                url = (
-                    f"{self.host}/v1beta/models/{self.model}:generateContent"
-                    f"?key={self.api_key}"
-                )
-                resp = requests.post(
-                    url,
-                    json={"contents": [{"parts": [{"text": "ping"}]}]},
-                    timeout=10,
-                )
-                resp.raise_for_status()
-                return True, self.model
-            except Exception as e:
-                return False, str(e)
-
-        return False, "Unknown provider"
+                    if list_resp.status_code == 200:
+                        models = list_resp.json().get("models", [])
+                        available = [m.get("displayName", m.get("name", "?")) for m in models[:3]]
+                        return False, f"Model '{self.model}' not found. Available: {available}. Check https://aistudio.google.com/apikey"
+                except:
+                    pass
+                return False, f"Model '{self.model}' not found (404). Check API key and model name at https://aistudio.google.com/apikey"
+            resp.raise_for_status()
+            return True, self.model
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                return False, "API key invalid or revoked. Check https://aistudio.google.com/apikey"
+            return False, error_msg
 
     # ── Internal: routing ─────────────────────────────────────────────────────
 
     def _call(self, system: str, messages: list, temperature: float) -> tuple:
-        """Route to the correct provider's structured call implementation."""
-        if self.provider == "anthropic":
-            return self._call_anthropic(system, messages, temperature)
-        elif self.provider == "openai":
-            return self._call_openai(system, messages, temperature)
-        elif self.provider == "gemini":
-            return self._call_gemini(system, messages, temperature)
-        else:
-            return self._call_ollama_native(system, messages, temperature)
+        """Call Gemini API with structured prompt."""
+        return self._call_gemini(system, messages, temperature)
 
-    # Keep _call_ollama as alias so existing planner code that calls it still works
-    def _call_ollama(self, system, messages, temperature):
-        return self._call(system, messages, temperature)
-
-    def _call_ollama_native(self, system: str, messages: list, temperature: float) -> tuple:
-        start  = time.monotonic()
-        payload = {
-            "model":    self.model,
-            "stream":   False,
-            "options":  {"temperature": temperature},
-            "messages": [{"role": "system", "content": system}] + messages,
-        }
-        meta = {}
-        try:
-            resp = requests.post(
-                f"{self.host}/api/chat",
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            data     = resp.json()
-            raw_text = data.get("message", {}).get("content", "")
-            meta = {
-                "latency_s":     round(time.monotonic() - start, 2),
-                "output_tokens": data.get("eval_count", 0),
-                "model":         data.get("model", self.model),
-                "provider":      "ollama",
-            }
-            return raw_text, meta
-        except Exception as e:
-            meta = {
-                "error":     str(e),
-                "latency_s": round(time.monotonic() - start, 2),
-                "provider":  "ollama",
-            }
-            return None, meta
-
-    def _call_anthropic(self, system: str, messages: list, temperature: float) -> tuple:
+    def _call_gemini(self, system: str, messages: list, temperature: float) -> tuple:
         start = time.monotonic()
-        headers = {
-            "x-api-key":         self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type":      "application/json",
-        }
+        # Convert messages to Gemini format and prepend system message
+        contents = []
+        
+        # Add system message as the first user message
+        if system:
+            contents.append({
+                "role": "user",
+                "parts": [{"text": system}],
+            })
+            contents.append({
+                "role": "model",
+                "parts": [{"text": "Understood. I will follow these instructions."}],
+            })
+        
+        # Add conversation messages
+        for msg in messages:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append({
+                "role": role,
+                "parts": [{"text": msg["content"]}],
+            })
+        
         payload = {
-            "model":       self.model,
-            "max_tokens":  1024,
-            "temperature": temperature,
-            "system":      system,
-            "messages":    messages,
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": 1024,
+            },
         }
         meta = {}
         try:
             resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
+                f"{self.host}/v1beta/models/{self.model}:generateContent",
+                params={"key": self.api_key},
                 json=payload,
                 timeout=self.timeout,
             )
             resp.raise_for_status()
-            data     = resp.json()
-            raw_text = data["content"][0]["text"]
-            usage    = data.get("usage", {})
+            data = resp.json()
+            raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            usage = data.get("usageMetadata", {})
             meta = {
                 "latency_s":     round(time.monotonic() - start, 2),
-                "output_tokens": usage.get("output_tokens", 0),
-                "model":         data.get("model", self.model),
-                "provider":      "anthropic",
+                "output_tokens": usage.get("outputTokenCount", 0),
+                "model":         self.model,
+                "provider":      "gemini",
             }
             return raw_text, meta
         except Exception as e:
             meta = {
                 "error":     str(e),
                 "latency_s": round(time.monotonic() - start, 2),
-                "provider":  "anthropic",
-            }
-            return None, meta
-
-    def _call_openai(self, system: str, messages: list, temperature: float) -> tuple:
-        start = time.monotonic()
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type":  "application/json",
-        }
-        payload = {
-            "model":       self.model,
-            "temperature": temperature,
-            "messages":    [{"role": "system", "content": system}] + messages,
-        }
-        meta = {}
-        try:
-            resp = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            data     = resp.json()
-            raw_text = data["choices"][0]["message"]["content"]
-            usage    = data.get("usage", {})
-            meta = {
-                "latency_s":     round(time.monotonic() - start, 2),
-                "output_tokens": usage.get("completion_tokens", 0),
-                "model":         data.get("model", self.model),
-                "provider":      "openai",
-            }
-            return raw_text, meta
-        except Exception as e:
-            meta = {
-                "error":     str(e),
-                "latency_s": round(time.monotonic() - start, 2),
-                "provider":  "openai",
+                "provider":  "gemini",
             }
             return None, meta
 
@@ -719,55 +518,37 @@ def _ts() -> str:
 if __name__ == "__main__":
     import sys
 
-    print("=== llm.py smoke test (Day 4 — provider abstraction) ===\n")
+    print("=== llm.py smoke test (Gemini-only) ===\n")
 
-    # [1] Provider routing — Ollama (default)
-    print("[1] LLMClient(provider='ollama')")
-    llm = LLMClient(provider="ollama", verbose=False)
-    assert llm.provider == "ollama"
-    assert llm.model == OLLAMA_MODEL
-    print(f"    provider={llm.provider}  model={llm.model}  host={llm.host}  OK\n")
-
-    # [2] Provider routing — Anthropic
-    print("[2] LLMClient(provider='anthropic', api_key='sk-test')")
-    llm_ant = LLMClient(provider="anthropic", api_key="sk-ant-test", verbose=False)
-    assert llm_ant.provider == "anthropic"
-    assert llm_ant.model == ANTHROPIC_MODEL
-    print(f"    provider={llm_ant.provider}  model={llm_ant.model}  OK\n")
-
-    # [3] Provider routing — OpenAI
-    print("[3] LLMClient(provider='openai', api_key='sk-test')")
-    llm_oai = LLMClient(provider="openai", api_key="sk-test", verbose=False)
-    assert llm_oai.provider == "openai"
-    print(f"    provider={llm_oai.provider}  model={llm_oai.model}  OK\n")
-
-    # [4] Unknown provider raises
-    print("[4] Unknown provider raises ValueError")
+    # [1] Basic initialization — Gemini
+    print("[1] LLMClient(api_key='test-key')")
     try:
-        LLMClient(provider="groq", verbose=False)
+        llm = LLMClient(api_key="test-key", verbose=False)
+        assert llm.provider == "gemini"
+        assert llm.model == GEMINI_MODEL
+        print(f"    provider={llm.provider}  model={llm.model}  host={llm.host}  OK\n")
+    except Exception as e:
+        print(f"    ERROR: {e}\n")
+        sys.exit(1)
+
+    # [2] Gemini requires key
+    print("[2] Gemini without key raises ValueError")
+    os.environ.pop("GOOGLE_API_KEY", None)
+    try:
+        LLMClient(verbose=False)
         assert False, "Should raise"
     except ValueError as e:
         print(f"    Correctly raised: {e}\n")
 
-    # [5] Anthropic requires key
-    print("[5] Anthropic without key raises ValueError")
-    os.environ.pop("ANTHROPIC_API_KEY", None)
-    try:
-        LLMClient(provider="anthropic", verbose=False)
-        assert False, "Should raise"
-    except ValueError as e:
-        print(f"    Correctly raised: {e}\n")
+    # [3] generate_text exists
+    print("[3] generate_text() method exists")
+    client = LLMClient(api_key="test-key", verbose=False)
+    assert hasattr(client, "generate_text"), "generate_text missing"
+    print(f"    generate_text present  OK\n")
 
-    # [6] generate_text exists and routes correctly
-    print("[6] generate_text() method exists on all providers")
-    for p, key in [("ollama", None), ("anthropic", "sk-test"), ("openai", "sk-test")]:
-        client = LLMClient(provider=p, api_key=key, verbose=False)
-        assert hasattr(client, "generate_text"), f"generate_text missing for {p}"
-        print(f"    {p}: generate_text present  OK")
-
-    # [7] JSON parse + validation (provider-independent)
-    print("\n[7] _parse_json + _validate_action (provider-independent)")
-    llm2 = LLMClient(provider="ollama", verbose=False)
+    # [4] JSON parse + validation (provider-independent)
+    print("[4] _parse_json + _validate_action")
+    llm2 = LLMClient(api_key="test-key", verbose=False)
     parsed, err = llm2._parse_json(
         '{"tool": "nmap_scan", "args": {"target": "10.10.10.5"}, "reasoning": "Start."}'
     )
@@ -776,18 +557,17 @@ if __name__ == "__main__":
     assert validated is not None and verr is None
     print(f"    parse+validate OK: tool={validated['tool']}\n")
 
-    # [8] Live Ollama ping (only if running)
-    host = sys.argv[1] if len(sys.argv) > 1 else OLLAMA_HOST
-    llm3 = LLMClient(provider="ollama", host=host, verbose=True)
-    print(f"[8] Pinging Ollama at {host}...")
-    ok, msg = llm3.ping()
-    if ok:
-        print(f"    Reachable — model: {msg}")
-        print("\n[9] Live generate_text() call...")
-        result = llm3.generate_text("Say hello in one sentence.", temperature=0.3, max_tokens=50)
-        print(f"    Response: {result[:100]}")
+    # [5] Live Gemini ping (only if API key is available)
+    print("[5] Pinging Gemini API...")
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if api_key:
+        llm3 = LLMClient(api_key=api_key, verbose=True)
+        ok, msg = llm3.ping()
+        if ok:
+            print(f"    Reachable — model: {msg}")
+        else:
+            print(f"    Unreachable: {msg}")
     else:
-        print(f"    Unreachable: {msg}")
-        print("    (Skipping live generation test)")
+        print(f"    Skipped (set GOOGLE_API_KEY to test live)")
 
     print("\nAll offline tests passed.")
