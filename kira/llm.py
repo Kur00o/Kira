@@ -30,6 +30,10 @@ GEMINI_API_KEY  = ""                 # Loaded from GOOGLE_API_KEY env var
 GEMINI_MODEL    = "gemini-2.5-flash"
 GEMINI_HOST     = "https://generativelanguage.googleapis.com"
 
+# Google Gemini (cloud)
+GEMINI_KEY      = ""                 # or: export GEMINI_API_KEY=...
+GEMINI_MODEL    = "gemini-2.0-flash"
+
 DEFAULT_TIMEOUT = 120
 MAX_RETRIES     = 3
 RETRY_DELAY     = 1.5
@@ -50,8 +54,9 @@ DEFAULT_TEMPERATURE = 0.2
 
 VALID_TOOLS = [
     "nmap_scan", "gobuster_dir", "searchsploit", "enum4linux",
-    "curl_probe", "whatweb", "msf_exploit", "shell_cmd", "linpeas",
-    "add_finding", "add_note", "advance_phase", "REPORT", "HALT",
+    "curl_probe", "whatweb", "msf_search", "msf_exploit",
+    "shell_cmd", "linpeas", "add_finding", "add_note",
+    "advance_phase", "REPORT", "HALT",
 ]
 
 
@@ -247,6 +252,27 @@ class LLMClient:
         except Exception:
             return ""
 
+    def _generate_text_gemini(self, prompt: str, temperature: float, max_tokens: int) -> str:
+        url = (
+            f"{self.host}/v1beta/models/{self.model}:generateContent"
+            f"?key={self.api_key}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature":     temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+            return (
+                resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            )
+        except Exception:
+            return ""
+
     # ── Ping ──────────────────────────────────────────────────────────────────
 
     def ping(self) -> tuple[bool, str]:
@@ -349,6 +375,52 @@ class LLMClient:
             meta = {
                 "latency_s":     round(time.monotonic() - start, 2),
                 "output_tokens": usage.get("outputTokenCount", 0),
+                "model":         self.model,
+                "provider":      "gemini",
+            }
+            return raw_text, meta
+        except Exception as e:
+            meta = {
+                "error":     str(e),
+                "latency_s": round(time.monotonic() - start, 2),
+                "provider":  "gemini",
+            }
+            return None, meta
+
+    def _call_gemini(self, system: str, messages: list, temperature: float) -> tuple:
+        start = time.monotonic()
+        # Gemini uses a flat contents list; prepend system as a user turn
+        # with a model ack so the conversation is valid
+        contents = [
+            {"role": "user",  "parts": [{"text": system}]},
+            {"role": "model", "parts": [{"text": "Understood. I will reply with only raw JSON."}]},
+        ]
+        for msg in messages:
+            role = "model" if msg["role"] == "assistant" else "user"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+        url = (
+            f"{self.host}/v1beta/models/{self.model}:generateContent"
+            f"?key={self.api_key}"
+        )
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature":     temperature,
+                "maxOutputTokens": 512,
+                "responseMimeType": "application/json",  # ask Gemini for JSON output
+            },
+        }
+        meta = {}
+        try:
+            resp = requests.post(url, json=payload, timeout=self.timeout)
+            resp.raise_for_status()
+            data     = resp.json()
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            usage    = data.get("usageMetadata", {})
+            meta = {
+                "latency_s":     round(time.monotonic() - start, 2),
+                "output_tokens": usage.get("candidatesTokenCount", 0),
                 "model":         self.model,
                 "provider":      "gemini",
             }
