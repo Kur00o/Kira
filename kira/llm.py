@@ -1,10 +1,10 @@
 """
-kira/llm.py — LLM Interface (Gemini-only)
-==========================================
-All communication with the LLM flows through Google Gemini.
+kira/llm.py — LLM Interface (Gemini via Vertex AI)
+===================================================
+All communication with the LLM flows through Google Gemini via Vertex AI.
 
 Usage:
-    llm = LLMClient()    # Pulls GOOGLE_API_KEY from .env or environment
+    llm = LLMClient()    # Pulls GOOGLE_API_KEY, GEMINI_PROJECT, GEMINI_LOCATION from .env
 
     # Planner action (JSON mode):
     action = llm.next_action(context_summary, phase="ENUM")
@@ -28,7 +28,9 @@ import requests
 
 GEMINI_API_KEY  = ""                 # Loaded from GOOGLE_API_KEY env var
 GEMINI_MODEL    = "gemini-2.5-flash"
-GEMINI_HOST     = "https://generativelanguage.googleapis.com"
+GEMINI_HOST     = "https://us-central1-aiplatform.googleapis.com"  # Vertex AI endpoint
+GEMINI_PROJECT  = ""                 # GCP project ID — set via env var GEMINI_PROJECT
+GEMINI_LOCATION = "us-central1"      # GCP region
 
 DEFAULT_TIMEOUT = 120
 MAX_RETRIES     = 5  # Increased from 3 to handle rate limits
@@ -135,6 +137,8 @@ class LLMClient:
         self.host    = GEMINI_HOST
         self.model   = model or GEMINI_MODEL
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY", GEMINI_API_KEY)
+        self.project = os.getenv("GEMINI_PROJECT", GEMINI_PROJECT)
+        self.location = os.getenv("GEMINI_LOCATION", GEMINI_LOCATION)
         self.timeout = timeout
         self.verbose = verbose
         self._call_log: list[dict] = []
@@ -239,9 +243,12 @@ class LLMClient:
         backoff = INITIAL_BACKOFF
         for attempt in range(1, MAX_RETRIES + 1):
             try:
+                # Vertex AI endpoint with Bearer token auth
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                url = f"{self.host}/v1/projects/{self.project}/locations/{self.location}/publishers/google/models/{self.model}:generateContent"
                 resp = requests.post(
-                    f"{self.host}/v1beta/models/{self.model}:generateContent",
-                    params={"key": self.api_key},
+                    url,
+                    headers=headers,
                     json=payload,
                     timeout=self.timeout,
                 )
@@ -310,9 +317,12 @@ class LLMClient:
         backoff = INITIAL_BACKOFF
         for attempt in range(1, MAX_RETRIES + 1):
             try:
+                # Vertex AI endpoint with Bearer token auth
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                url = f"{self.host}/v1/projects/{self.project}/locations/{self.location}/publishers/google/models/{self.model}:generateContent"
                 resp = requests.post(
-                    f"{self.host}/v1beta/models/{self.model}:generateContent",
-                    params={"key": self.api_key},
+                    url,
+                    headers=headers,
                     json=payload,
                     timeout=10,
                 )
@@ -466,9 +476,12 @@ class LLMClient:
         
         for attempt in range(1, MAX_RETRIES + 1):
             try:
+                # Vertex AI endpoint with Bearer token auth
+                headers = {"Authorization": f"Bearer {self.api_key}"}
+                url = f"{self.host}/v1/projects/{self.project}/locations/{self.location}/publishers/google/models/{self.model}:generateContent"
                 resp = requests.post(
-                    f"{self.host}/v1beta/models/{self.model}:generateContent",
-                    params={"key": self.api_key},
+                    url,
+                    headers=headers,
                     json=payload,
                     timeout=self.timeout,
                 )
