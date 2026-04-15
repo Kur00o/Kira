@@ -1,26 +1,22 @@
 """
-kira/llm.py — LLM Interface (Gemini API)
-=========================================
-All LLM communication goes through the Google Gemini REST API.
+kira/llm.py — LLM Interface (Gemini API + Ollama/Gemma)
+=========================================================
+Auto-selects backend from environment:
+  - GEMINI_API_KEY set → uses Gemini REST API
+  - OLLAMA_MODEL set (or GEMINI_API_KEY absent) → uses local Ollama
 
-Endpoint:
-    POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
+Gemini endpoint:
+    POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=KEY
 
-Request format:
-    {"contents": [{"parts": [{"text": "..."}]}]}
-
-Response parsing:
-    response["candidates"][0]["content"]["parts"][0]["text"]
+Ollama endpoint:
+    POST http://localhost:11434/api/generate
+    {"model": "gemma3:4b", "prompt": "...", "stream": false}
 
 Config (env vars / .env):
-    GEMINI_API_KEY  — required, AIzaSy... key from Google AI Studio
-    GEMINI_MODEL    — optional, default gemini-2.5-flash
-    GEMINI_BASE_URL — optional, default https://generativelanguage.googleapis.com
-
-Swapping backends later:
-    Replace _call() and ping() with a new provider's implementation.
-    Everything above those methods (prompt building, JSON parsing,
-    validation, retry logic) is provider-agnostic and stays the same.
+    GEMINI_API_KEY  — use Gemini if set
+    GEMINI_MODEL    — default gemini-2.5-flash
+    OLLAMA_HOST     — default http://localhost:11434
+    OLLAMA_MODEL    — default gemma3:4b (used when no GEMINI_API_KEY)
 """
 
 import json
@@ -37,11 +33,16 @@ import requests
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com"
 GEMINI_MODEL    = "gemini-2.5-flash"
-GEMINI_API_KEY  = ""   # set via GEMINI_API_KEY env var
+GEMINI_API_KEY  = ""
+
+# ── Ollama configuration ──────────────────────────────────────────────────────
+
+OLLAMA_HOST  = "http://localhost:11434"
+OLLAMA_MODEL = "gemma3:4b"
 
 DEFAULT_TIMEOUT = 120
 MAX_RETRIES     = 5
-INITIAL_BACKOFF = 2    # seconds — wait 2^attempt between retries (2, 4, 8, 16, 32)
+INITIAL_BACKOFF = 2
 
 # Per-phase temperature — lower = more deterministic
 PHASE_TEMPERATURE = {
@@ -144,36 +145,48 @@ class LLMClient:
         base_url: str  = None,
         timeout:  int  = DEFAULT_TIMEOUT,
         verbose:  bool = True,
-        # Accept legacy kwargs so existing call sites don't break
+        # Ollama kwargs
         host:     str  = None,
+        # Legacy ignored kwargs
         provider: str  = None,
         project:  str  = None,
         location: str  = None,
     ):
-        self.provider = "gemini"
-        self.api_key  = (api_key  or os.getenv("GEMINI_API_KEY", GEMINI_API_KEY)).strip()
-        self.model    = (model    or os.getenv("GEMINI_MODEL",   GEMINI_MODEL)).strip()
-        self.base_url = (base_url or os.getenv("GEMINI_BASE_URL", GEMINI_BASE_URL)).rstrip("/")
         self.timeout  = timeout
         self.verbose  = verbose
         self._call_log: list[dict] = []
 
-        if not self.api_key:
-            raise ValueError(
-                "Gemini requires an API key. "
-                "Set GEMINI_API_KEY in your .env file or pass api_key=."
-            )
+        # ── Auto-select backend ───────────────────────────────────────────
+        # Use Gemini if GEMINI_API_KEY is provided, else fall back to Ollama
+        resolved_key  = (api_key  or os.getenv("GEMINI_API_KEY", GEMINI_API_KEY)).strip()
+        ollama_model  = os.getenv("OLLAMA_MODEL", OLLAMA_MODEL)
+        ollama_host   = (host or os.getenv("OLLAMA_HOST", OLLAMA_HOST)).strip().rstrip("/")
+
+        if resolved_key:
+            self.provider = "gemini"
+            self.api_key  = resolved_key
+            self.model    = (model or os.getenv("GEMINI_MODEL", GEMINI_MODEL)).strip()
+            self.base_url = (base_url or os.getenv("GEMINI_BASE_URL", GEMINI_BASE_URL)).rstrip("/")
+            self.host     = None
+        else:
+            self.provider = "ollama"
+            self.api_key  = None
+            self.model    = model or ollama_model
+            self.host     = ollama_host
+            self.base_url = None
 
         if self.verbose:
-            print(f"[LLM] Gemini | model={self.model} | endpoint={self._endpoint()}")
+            if self.provider == "gemini":
+                print(f"[LLM] Gemini | model={self.model} | endpoint={self._endpoint()}")
+            else:
+                print(f"[LLM] Ollama  | host={self.host} | model={self.model}")
 
     # ── URL builder ───────────────────────────────────────────────────────────
 
     def _endpoint(self) -> str:
-        """
-        Full generateContent URL with API key as query param.
-        https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
-        """
+        """Full Gemini generateContent URL. Only valid for Gemini provider."""
+        if self.provider != "gemini":
+            return f"{self.host}/api/generate"
         return (
             f"{self.base_url}/v1beta/models/{self.model}"
             f":generateContent?key={self.api_key}"
@@ -240,6 +253,22 @@ class LLMClient:
         max_tokens:  int   = 500,
     ) -> str:
         """Free-text generation for ReportGenerator — no JSON enforcement."""
+        if self.provider == "ollama":
+            payload = {"model": self.model, "prompt": prompt, "stream": False,
+                       "options": {"temperature": temperature, "num_predict": max_tokens}}
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    resp = requests.post(f"{self.host}/api/generate", json=payload, timeout=self.timeout)
+                    resp.raise_for_status()
+                    return resp.json().get("response", "").strip()
+                except Exception as e:
+                    if attempt < MAX_RETRIES:
+                        time.sleep(INITIAL_BACKOFF)
+                        continue
+                    return f"(generate_text failed: {str(e)[:80]})"
+            return "(Max retries exceeded)"
+
+        # Gemini path
         payload = self._build_payload(
             system=None,
             messages=[{"role": "user", "content": prompt}],
@@ -264,11 +293,31 @@ class LLMClient:
     # ── Public: ping ──────────────────────────────────────────────────────────
 
     def ping(self) -> tuple[bool, str]:
-        """
-        Verify Gemini API is reachable before the agent starts.
-        Sends a minimal generateContent request and prints the raw response.
-        Returns (True, model_name) on success, (False, error_msg) on failure.
-        """
+        """Verify LLM is reachable. Returns (True, model) or (False, error)."""
+        if self.provider == "ollama":
+            return self._ping_ollama()
+        return self._ping_gemini()
+
+    def _ping_ollama(self) -> tuple[bool, str]:
+        payload = {"model": self.model, "prompt": "Reply with the single word: ok",
+                   "stream": False, "options": {"temperature": 0.1, "num_predict": 5}}
+        try:
+            resp = requests.post(f"{self.host}/api/generate", json=payload, timeout=15)
+            if self.verbose:
+                print(f"[LLM] Ping → HTTP {resp.status_code}")
+            if resp.status_code == 404:
+                return False, f"Model '{self.model}' not found. Run: ollama pull {self.model}"
+            resp.raise_for_status()
+            text = resp.json().get("response", "")
+            if self.verbose:
+                print(f"[LLM] Ping response: {text!r}")
+            return True, self.model
+        except requests.exceptions.ConnectionError:
+            return False, f"Cannot connect to Ollama at {self.host}. Run: ollama serve"
+        except Exception as e:
+            return False, str(e)
+
+    def _ping_gemini(self) -> tuple[bool, str]:
         payload = self._build_payload(
             system=None,
             messages=[{"role": "user", "content": "Reply with the single word: ok"}],
@@ -338,6 +387,13 @@ class LLMClient:
                 return False, str(e)
 
         return False, "Max ping retries exceeded"
+
+    # ── Internal: routing ─────────────────────────────────────────────────────
+
+    def _call(self, system: str, messages: list, temperature: float) -> tuple:
+        if self.provider == "ollama":
+            return self._call_ollama(system, messages, temperature)
+        return self._call_gemini(system, messages, temperature)
 
     # ── Internal: Gemini API call ─────────────────────────────────────────────
 
@@ -409,6 +465,51 @@ class LLMClient:
             raise _RateLimitError()
         resp.raise_for_status()
         return resp
+
+    # ── Internal: Ollama call ─────────────────────────────────────────────────
+
+    def _call_ollama(self, system: str, messages: list, temperature: float) -> tuple:
+        """POST to Ollama /api/generate. Returns (raw_text, meta)."""
+        parts = []
+        if system:
+            parts.append(f"### SYSTEM\n{system}")
+        for msg in messages:
+            role = "USER" if msg["role"] == "user" else "ASSISTANT"
+            parts.append(f"### {role}\n{msg['content']}")
+        parts.append("### ASSISTANT")
+        prompt = "\n\n".join(parts)
+
+        payload = {
+            "model":   self.model,
+            "prompt":  prompt,
+            "stream":  False,
+            "options": {"temperature": temperature, "num_predict": 1024},
+        }
+        start = time.monotonic()
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                resp = requests.post(
+                    f"{self.host}/api/generate",
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                meta = {
+                    "latency_s":     round(time.monotonic() - start, 2),
+                    "output_tokens": data.get("eval_count", 0),
+                    "model":         self.model,
+                    "provider":      "ollama",
+                    "attempts":      attempt,
+                }
+                return data.get("response", ""), meta
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    time.sleep(INITIAL_BACKOFF)
+                    continue
+                meta = {"error": str(e), "latency_s": round(time.monotonic() - start, 2), "provider": "ollama", "attempts": attempt}
+                return None, meta
+        return None, {"error": "Max retries", "provider": "ollama", "attempts": MAX_RETRIES}
 
     # ── Internal: payload builder ─────────────────────────────────────────────
 

@@ -483,7 +483,7 @@ def main():
 
     # ── ToolRunner + KnowledgeBase ────────────────────────────────────────────
     runner = ToolRunner(session_dir=str(session_dir),
-                        verbose=True, msf=msf_client)
+                        verbose=False, msf=msf_client)
     kb = KnowledgeBase() if _KB_AVAILABLE else None
 
     avail   = runner.check_tools()
