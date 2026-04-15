@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Kira Pentest Report — [[ target ]]</title>
+<title>Kira Pentest Report — {{ target }}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
 
@@ -27,6 +27,7 @@
   }
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
   html { scroll-behavior: smooth; }
 
   body {
@@ -37,135 +38,503 @@
     font-size: 15px;
   }
 
+  /* ── Sidebar nav ── */
   .sidebar {
-    position: fixed; top: 0; left: 0;
-    width: 220px; height: 100vh;
+    position: fixed;
+    top: 0; left: 0;
+    width: 220px;
+    height: 100vh;
     background: var(--surface);
     border-right: 1px solid var(--border);
     padding: 2rem 1.5rem;
-    overflow-y: auto; z-index: 100;
+    overflow-y: auto;
+    z-index: 100;
   }
-  .sidebar-logo { font-family: var(--mono); font-size: 1.4rem; font-weight: 600; color: var(--accent); letter-spacing: -0.02em; margin-bottom: 0.25rem; }
-  .sidebar-sub  { font-size: 0.7rem; color: var(--text-dim); font-family: var(--mono); margin-bottom: 2rem; letter-spacing: 0.08em; text-transform: uppercase; }
-  .nav-section  { font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--mono); margin: 1.5rem 0 0.5rem; }
-  .nav-link     { display: block; padding: 0.35rem 0.75rem; margin-bottom: 0.2rem; border-radius: 4px; color: var(--text); text-decoration: none; font-size: 0.82rem; transition: background 0.15s, color 0.15s; border-left: 2px solid transparent; }
-  .nav-link:hover { background: var(--surface2); color: var(--text-bright); border-left-color: var(--accent); }
 
-  .main { margin-left: 220px; min-height: 100vh; }
+  .sidebar-logo {
+    font-family: var(--mono);
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: -0.02em;
+    margin-bottom: 0.25rem;
+  }
 
+  .sidebar-sub {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    margin-bottom: 2rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .nav-section {
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-family: var(--mono);
+    margin: 1.5rem 0 0.5rem;
+  }
+
+  .nav-link {
+    display: block;
+    padding: 0.35rem 0.75rem;
+    margin-bottom: 0.2rem;
+    border-radius: 4px;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 0.82rem;
+    transition: background 0.15s, color 0.15s;
+    border-left: 2px solid transparent;
+  }
+
+  .nav-link:hover {
+    background: var(--surface2);
+    color: var(--text-bright);
+    border-left-color: var(--accent);
+  }
+
+  /* ── Main content ── */
+  .main {
+    margin-left: 220px;
+    min-height: 100vh;
+  }
+
+  /* ── Cover ── */
   .cover {
     background: linear-gradient(135deg, #0d0f14 0%, #141720 50%, #1a0f14 100%);
     border-bottom: 1px solid var(--border);
-    padding: 5rem 4rem 4rem; position: relative; overflow: hidden;
+    padding: 5rem 4rem 4rem;
+    position: relative;
+    overflow: hidden;
   }
+
   .cover::before {
-    content: ''; position: absolute; top: -80px; right: -80px;
+    content: '';
+    position: absolute;
+    top: -80px; right: -80px;
     width: 400px; height: 400px;
     background: radial-gradient(circle, rgba(232,69,69,0.08) 0%, transparent 70%);
     pointer-events: none;
   }
-  .cover-tag    { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 1.5rem; }
-  .cover-title  { font-size: 2.8rem; font-weight: 700; color: var(--text-bright); line-height: 1.1; margin-bottom: 0.5rem; letter-spacing: -0.03em; }
-  .cover-target { font-family: var(--mono); font-size: 1.2rem; color: var(--accent2); margin-bottom: 2.5rem; }
-  .cover-meta   { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1.5rem; max-width: 700px; margin-bottom: 3rem; }
-  .meta-item label { display: block; font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--mono); margin-bottom: 0.3rem; }
-  .meta-item span  { font-size: 0.9rem; color: var(--text-bright); font-family: var(--mono); }
 
-  .sev-bar  { display: flex; gap: 1rem; flex-wrap: wrap; }
-  .sev-pill { display: flex; align-items: center; gap: 0.5rem; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 1rem; }
-  .sev-dot  { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  .sev-count { font-family: var(--mono); font-size: 1.4rem; font-weight: 600; line-height: 1; color: var(--text-bright); }
-  .sev-label { font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; }
+  .cover-tag {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    margin-bottom: 1.5rem;
+  }
 
-  .section { padding: 3rem 4rem; border-bottom: 1px solid var(--border); }
+  .cover-title {
+    font-size: 2.8rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    line-height: 1.1;
+    margin-bottom: 0.5rem;
+    letter-spacing: -0.03em;
+  }
+
+  .cover-target {
+    font-family: var(--mono);
+    font-size: 1.2rem;
+    color: var(--accent2);
+    margin-bottom: 2.5rem;
+  }
+
+  .cover-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1.5rem;
+    max-width: 700px;
+    margin-bottom: 3rem;
+  }
+
+  .meta-item label {
+    display: block;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-family: var(--mono);
+    margin-bottom: 0.3rem;
+  }
+
+  .meta-item span {
+    font-size: 0.9rem;
+    color: var(--text-bright);
+    font-family: var(--mono);
+  }
+
+  /* Severity summary bar */
+  .sev-bar {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .sev-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 1rem;
+  }
+
+  .sev-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .sev-count {
+    font-family: var(--mono);
+    font-size: 1.4rem;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--text-bright);
+  }
+
+  .sev-label {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* ── Section wrapper ── */
+  .section {
+    padding: 3rem 4rem;
+    border-bottom: 1px solid var(--border);
+  }
+
   .section:last-child { border-bottom: none; }
-  .section-header { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 2rem; }
-  .section-num   { font-family: var(--mono); font-size: 0.7rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; padding: 0.2rem 0.5rem; border: 1px solid var(--accent); border-radius: 3px; flex-shrink: 0; }
-  .section-title { font-size: 1.5rem; font-weight: 700; color: var(--text-bright); letter-spacing: -0.02em; }
 
-  .exec-text { max-width: 760px; font-size: 0.95rem; color: var(--text); line-height: 1.85; }
+  .section-header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .section-num {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+
+  .section-title {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-bright);
+    letter-spacing: -0.02em;
+  }
+
+  /* ── Executive Summary ── */
+  .exec-text {
+    max-width: 760px;
+    font-size: 0.95rem;
+    color: var(--text);
+    line-height: 1.85;
+  }
+
   .exec-text p + p { margin-top: 1rem; }
 
-  .timeline-table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
-  .timeline-table th { text-align: left; font-family: var(--mono); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); }
-  .timeline-table td { padding: 0.65rem 0.75rem; border-bottom: 1px solid rgba(42,47,66,0.5); vertical-align: top; }
-  .timeline-table tr:hover td { background: var(--surface2); }
-  .timeline-table .ts        { font-family: var(--mono); font-size: 0.78rem; color: var(--text-dim); white-space: nowrap; }
-  .timeline-table .tool-name { font-family: var(--mono); color: var(--accent2); white-space: nowrap; }
-  .badge-ok   { background: rgba(76,175,134,0.15); color: var(--low);      border: 1px solid rgba(76,175,134,0.3);  font-family: var(--mono); font-size: 0.65rem; padding: 0.15rem 0.45rem; border-radius: 3px; }
-  .badge-fail { background: rgba(232,69,69,0.12);  color: var(--critical); border: 1px solid rgba(232,69,69,0.25); font-family: var(--mono); font-size: 0.65rem; padding: 0.15rem 0.45rem; border-radius: 3px; }
+  /* ── Timeline ── */
+  .timeline-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.83rem;
+  }
 
-  .risk-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  .risk-table th { text-align: left; font-family: var(--mono); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); }
-  .risk-table td { padding: 0.75rem; border-bottom: 1px solid rgba(42,47,66,0.5); vertical-align: middle; }
+  .timeline-table th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .timeline-table td {
+    padding: 0.65rem 0.75rem;
+    border-bottom: 1px solid rgba(42,47,66,0.5);
+    vertical-align: top;
+  }
+
+  .timeline-table tr:hover td { background: var(--surface2); }
+
+  .timeline-table .ts {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .timeline-table .tool-name {
+    font-family: var(--mono);
+    color: var(--accent2);
+    white-space: nowrap;
+  }
+
+  .badge-ok {
+    background: rgba(76,175,134,0.15);
+    color: var(--low);
+    border: 1px solid rgba(76,175,134,0.3);
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 3px;
+  }
+
+  .badge-fail {
+    background: rgba(232,69,69,0.12);
+    color: var(--critical);
+    border: 1px solid rgba(232,69,69,0.25);
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 3px;
+  }
+
+  /* ── Risk table ── */
+  .risk-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+
+  .risk-table th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-dim);
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .risk-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid rgba(42,47,66,0.5);
+    vertical-align: middle;
+  }
+
   .risk-table tr:hover td { background: var(--surface2); }
 
-  .sev-badge { display: inline-block; font-family: var(--mono); font-size: 0.7rem; font-weight: 600; padding: 0.2rem 0.6rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.06em; }
-  .sev-badge.critical { background: rgba(232,69,69,0.15);  color: #e84545; border: 1px solid rgba(232,69,69,0.3); }
-  .sev-badge.high     { background: rgba(245,166,35,0.15);  color: #f5a623; border: 1px solid rgba(245,166,35,0.3); }
-  .sev-badge.medium   { background: rgba(245,230,66,0.12);  color: #f5e642; border: 1px solid rgba(245,230,66,0.25); }
-  .sev-badge.low      { background: rgba(76,175,134,0.12);  color: #4caf86; border: 1px solid rgba(76,175,134,0.25); }
-  .sev-badge.info     { background: rgba(92,141,222,0.12);  color: #5c8dde; border: 1px solid rgba(92,141,222,0.25); }
+  .sev-badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
 
-  .cvss-score   { font-family: var(--mono); font-weight: 600; font-size: 0.9rem; }
-  .exploit-chip { font-family: var(--mono); font-size: 0.65rem; background: rgba(232,69,69,0.1); color: var(--accent); border: 1px solid rgba(232,69,69,0.2); padding: 0.1rem 0.4rem; border-radius: 3px; }
+  .sev-badge.critical { background: rgba(232,69,69,0.15);  color: var(--critical); border: 1px solid rgba(232,69,69,0.3); }
+  .sev-badge.high     { background: rgba(245,166,35,0.15);  color: var(--high);     border: 1px solid rgba(245,166,35,0.3); }
+  .sev-badge.medium   { background: rgba(245,230,66,0.12);  color: var(--medium);   border: 1px solid rgba(245,230,66,0.25); }
+  .sev-badge.low      { background: rgba(76,175,134,0.12);  color: var(--low);      border: 1px solid rgba(76,175,134,0.25); }
+  .sev-badge.info     { background: rgba(92,141,222,0.12);  color: var(--info);     border: 1px solid rgba(92,141,222,0.25); }
 
-  .finding-card        { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.5rem; overflow: hidden; }
-  .finding-card-header { display: flex; align-items: center; gap: 0.75rem; padding: 1rem 1.25rem; background: var(--surface2); border-bottom: 1px solid var(--border); }
-  .finding-card-title  { font-size: 0.95rem; font-weight: 600; color: var(--text-bright); flex: 1; }
-  .finding-card-meta   { display: flex; gap: 0.5rem; font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim); align-items: center; }
-  .finding-card-body   { padding: 1.25rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
-  @media (max-width: 700px) { .finding-card-body { grid-template-columns: 1fr; } }
-  .finding-field label { display: block; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--mono); color: var(--text-dim); margin-bottom: 0.4rem; }
-  .finding-field p     { font-size: 0.88rem; color: var(--text); line-height: 1.65; }
-  .finding-field.full  { grid-column: 1 / -1; }
+  .cvss-score {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 0.9rem;
+  }
 
-  pre  { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 1.25rem; overflow-x: auto; font-family: var(--mono); font-size: 0.78rem; color: var(--text); line-height: 1.6; max-height: 400px; }
-  code { font-family: var(--mono); font-size: 0.85em; background: var(--surface2); border: 1px solid var(--border); padding: 0.1em 0.35em; border-radius: 3px; color: var(--accent2); }
+  .exploit-chip {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    background: rgba(232,69,69,0.1);
+    color: var(--accent);
+    border: 1px solid rgba(232,69,69,0.2);
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+  }
 
-  .footer { padding: 2rem 4rem; border-top: 1px solid var(--border); font-size: 0.78rem; color: var(--text-dim); font-family: var(--mono); display: flex; justify-content: space-between; }
-  .empty-state { color: var(--text-dim); font-style: italic; font-size: 0.88rem; padding: 1rem 0; }
+  /* ── Finding cards ── */
+  .finding-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    overflow: hidden;
+  }
+
+  .finding-card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .finding-card-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-bright);
+    flex: 1;
+  }
+
+  .finding-card-meta {
+    display: flex;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    align-items: center;
+  }
+
+  .finding-card-body {
+    padding: 1.25rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+  }
+
+  @media (max-width: 700px) {
+    .finding-card-body { grid-template-columns: 1fr; }
+  }
+
+  .finding-field label {
+    display: block;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-family: var(--mono);
+    color: var(--text-dim);
+    margin-bottom: 0.4rem;
+  }
+
+  .finding-field p {
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.65;
+  }
+
+  .finding-field.full { grid-column: 1 / -1; }
+
+  /* ── Appendix / Code blocks ── */
+  pre {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1.25rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--text);
+    line-height: 1.6;
+    max-height: 400px;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.85em;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 0.1em 0.35em;
+    border-radius: 3px;
+    color: var(--accent2);
+  }
+
+  /* ── Footer ── */
+  .footer {
+    padding: 2rem 4rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* ── Utility ── */
+  .empty-state {
+    color: var(--text-dim);
+    font-style: italic;
+    font-size: 0.88rem;
+    padding: 1rem 0;
+  }
 </style>
 </head>
 <body>
 
+<!-- Sidebar -->
 <nav class="sidebar">
   <div class="sidebar-logo">Kira</div>
   <div class="sidebar-sub">Pentest Report</div>
+
   <div class="nav-section">Report</div>
   <a class="nav-link" href="#cover">Cover</a>
   <a class="nav-link" href="#exec-summary">Executive Summary</a>
   <a class="nav-link" href="#timeline">Attack Timeline</a>
+
   <div class="nav-section">Findings</div>
   <a class="nav-link" href="#risk-table">Risk Table</a>
   <a class="nav-link" href="#findings-detail">Finding Detail</a>
+
   <div class="nav-section">Appendix</div>
   <a class="nav-link" href="#appendix">Raw Output</a>
 </nav>
 
+<!-- Main -->
 <main class="main">
 
   <!-- Cover -->
   <section class="cover" id="cover">
     <div class="cover-tag">Penetration Test Report &nbsp;·&nbsp; Confidential</div>
     <div class="cover-title">Security Assessment</div>
-    <div class="cover-target">[[ target ]]</div>
+    <div class="cover-target">{{ target }}</div>
+
     <div class="cover-meta">
-      <div class="meta-item"><label>Date</label><span>[[ date ]]</span></div>
-      <div class="meta-item"><label>Authorized By</label><span>[[ authorized_by ]]</span></div>
-      <div class="meta-item"><label>Duration</label><span>[[ duration ]]</span></div>
-      <div class="meta-item"><label>Total Findings</label><span>[[ total_findings ]]</span></div>
+      <div class="meta-item">
+        <label>Date</label>
+        <span>{{ date }}</span>
+      </div>
+      <div class="meta-item">
+        <label>Authorized By</label>
+        <span>{{ authorized_by }}</span>
+      </div>
+      <div class="meta-item">
+        <label>Duration</label>
+        <span>{{ duration }}</span>
+      </div>
+      <div class="meta-item">
+        <label>Total Findings</label>
+        <span>{{ total_findings }}</span>
+      </div>
     </div>
+
+    <!-- Severity summary bar -->
     <div class="sev-bar">
-      [% for sev, count in severity_counts.items() %]
+      {% for sev, count in severity_counts.items() %}
       <div class="sev-pill">
-        <div class="sev-dot" style="background:[[ {'critical':'#e84545','high':'#f5a623','medium':'#f5e642','low':'#4caf86','info':'#5c8dde'}.get(sev,'#888') ]];"></div>
+        <div class="sev-dot" style="background: var(--{{ sev }});"></div>
         <div>
-          <div class="sev-count">[[ count ]]</div>
-          <div class="sev-label">[[ sev ]]</div>
+          <div class="sev-count">{{ count }}</div>
+          <div class="sev-label">{{ sev }}</div>
         </div>
       </div>
-      [% endfor %]
+      {% endfor %}
     </div>
   </section>
 
@@ -176,9 +545,9 @@
       <h2 class="section-title">Executive Summary</h2>
     </div>
     <div class="exec-text">
-      [% for paragraph in exec_summary_paragraphs %]
-      <p>[[ paragraph ]]</p>
-      [% endfor %]
+      {% for paragraph in exec_summary_paragraphs %}
+      <p>{{ paragraph }}</p>
+      {% endfor %}
     </div>
   </section>
 
@@ -188,24 +557,38 @@
       <span class="section-num">02</span>
       <h2 class="section-title">Attack Timeline</h2>
     </div>
-    [% if timeline_entries %]
+    {% if timeline_entries %}
     <table class="timeline-table">
-      <thead><tr><th>Timestamp</th><th>Tool</th><th>Status</th><th>Summary</th><th>Duration</th></tr></thead>
-      <tbody>
-        [% for entry in timeline_entries %]
+      <thead>
         <tr>
-          <td class="ts">[[ entry.ts ]]</td>
-          <td class="tool-name">[[ entry.tool ]]</td>
-          <td>[% if entry.ok %]<span class="badge-ok">OK</span>[% else %]<span class="badge-fail">FAIL</span>[% endif %]</td>
-          <td>[[ entry.summary ]]</td>
-          <td class="ts">[[ entry.elapsed_s ]]s</td>
+          <th>Timestamp</th>
+          <th>Tool</th>
+          <th>Status</th>
+          <th>Summary</th>
+          <th>Duration</th>
         </tr>
-        [% endfor %]
+      </thead>
+      <tbody>
+        {% for entry in timeline_entries %}
+        <tr>
+          <td class="ts">{{ entry.ts }}</td>
+          <td class="tool-name">{{ entry.tool }}</td>
+          <td>
+            {% if entry.ok %}
+            <span class="badge-ok">OK</span>
+            {% else %}
+            <span class="badge-fail">FAIL</span>
+            {% endif %}
+          </td>
+          <td>{{ entry.summary }}</td>
+          <td class="ts">{{ entry.elapsed_s }}s</td>
+        </tr>
+        {% endfor %}
       </tbody>
     </table>
-    [% else %]
+    {% else %}
     <p class="empty-state">No timeline entries recorded.</p>
-    [% endif %]
+    {% endif %}
   </section>
 
   <!-- Risk Table -->
@@ -214,26 +597,50 @@
       <span class="section-num">03</span>
       <h2 class="section-title">Risk Table</h2>
     </div>
-    [% if findings %]
+    {% if findings %}
     <table class="risk-table">
-      <thead><tr><th>#</th><th>Vulnerability</th><th>Severity</th><th>CVSS</th><th>Port / Service</th><th>CVE</th><th>Exploit</th></tr></thead>
-      <tbody>
-        [% for f in findings %]
+      <thead>
         <tr>
-          <td style="color:var(--text-dim);font-family:var(--mono);font-size:0.78rem;">[[ loop.index ]]</td>
-          <td><a href="#finding-[[ loop.index ]]" style="color:var(--text-bright);text-decoration:none;">[[ f.title ]]</a></td>
-          <td><span class="sev-badge [[ f.severity ]]">[[ f.severity ]]</span></td>
-          <td><span class="cvss-score">[[ f.cvss ]]</span></td>
-          <td style="font-family:var(--mono);font-size:0.82rem;">[[ f.port ]]/[[ f.service ]]</td>
-          <td style="font-family:var(--mono);font-size:0.78rem;color:var(--text-dim);">[[ f.cve or '—' ]]</td>
-          <td>[% if f.exploit_available %]<span class="exploit-chip">YES</span>[% else %]<span style="color:var(--text-dim);font-size:0.78rem;">—</span>[% endif %]</td>
+          <th>#</th>
+          <th>Vulnerability</th>
+          <th>Severity</th>
+          <th>CVSS</th>
+          <th>Port / Service</th>
+          <th>CVE</th>
+          <th>Exploit</th>
         </tr>
-        [% endfor %]
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        <tr>
+          <td style="color: var(--text-dim); font-family: var(--mono); font-size:0.78rem;">{{ loop.index }}</td>
+          <td><a href="#finding-{{ loop.index }}" style="color: var(--text-bright); text-decoration: none;">{{ f.title }}</a></td>
+          <td><span class="sev-badge {{ f.severity }}">{{ f.severity }}</span></td>
+          <td>
+            <span class="cvss-score" style="color:
+              {% if f.cvss >= 9.0 %}var(--critical)
+              {% elif f.cvss >= 7.0 %}var(--high)
+              {% elif f.cvss >= 4.0 %}var(--medium)
+              {% else %}var(--low){% endif %};">
+              {{ f.cvss }}
+            </span>
+          </td>
+          <td style="font-family: var(--mono); font-size: 0.82rem;">{{ f.port }}/{{ f.service }}</td>
+          <td style="font-family: var(--mono); font-size: 0.78rem; color: var(--text-dim);">{{ f.cve or '—' }}</td>
+          <td>
+            {% if f.exploit_available %}
+            <span class="exploit-chip">YES</span>
+            {% else %}
+            <span style="color: var(--text-dim); font-size: 0.78rem;">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
       </tbody>
     </table>
-    [% else %]
+    {% else %}
     <p class="empty-state">No findings recorded.</p>
-    [% endif %]
+    {% endif %}
   </section>
 
   <!-- Finding Detail -->
@@ -242,42 +649,45 @@
       <span class="section-num">04</span>
       <h2 class="section-title">Finding Detail</h2>
     </div>
-    [% if findings %]
-    [% for f in findings %]
-    <div class="finding-card" id="finding-[[ loop.index ]]">
+
+    {% if findings %}
+    {% for f in findings %}
+    <div class="finding-card" id="finding-{{ loop.index }}">
       <div class="finding-card-header">
-        <span class="sev-badge [[ f.severity ]]">[[ f.severity ]]</span>
-        <span class="finding-card-title">[[ f.title ]]</span>
+        <span class="sev-badge {{ f.severity }}">{{ f.severity }}</span>
+        <span class="finding-card-title">{{ f.title }}</span>
         <div class="finding-card-meta">
-          <span>CVSS [[ f.cvss ]]</span><span>·</span><span>port [[ f.port ]]</span>
-          [% if f.cve %]<span>·</span><span>[[ f.cve ]]</span>[% endif %]
+          <span>CVSS {{ f.cvss }}</span>
+          <span>·</span>
+          <span>port {{ f.port }}</span>
+          {% if f.cve %}<span>·</span><span>{{ f.cve }}</span>{% endif %}
         </div>
       </div>
       <div class="finding-card-body">
         <div class="finding-field full">
           <label>Description</label>
-          <p>[[ f.description or 'No description provided.' ]]</p>
+          <p>{{ f.description or 'No description provided.' }}</p>
         </div>
-        [% if f.writeup %]
+        {% if f.writeup %}
         <div class="finding-field full">
           <label>Analysis</label>
-          <p>[[ f.writeup ]]</p>
+          <p>{{ f.writeup }}</p>
         </div>
-        [% endif %]
+        {% endif %}
         <div class="finding-field">
           <label>Impact</label>
-          <p>[[ f.impact or 'See description.' ]]</p>
+          <p>{{ f.impact or 'See description.' }}</p>
         </div>
         <div class="finding-field">
           <label>Remediation</label>
-          <p>[[ f.remediation or 'No remediation specified.' ]]</p>
+          <p>{{ f.remediation or 'No remediation specified.' }}</p>
         </div>
       </div>
     </div>
-    [% endfor %]
-    [% else %]
+    {% endfor %}
+    {% else %}
     <p class="empty-state">No findings to display.</p>
-    [% endif %]
+    {% endif %}
   </section>
 
   <!-- Appendix -->
@@ -286,21 +696,25 @@
       <span class="section-num">05</span>
       <h2 class="section-title">Appendix — Raw Tool Output</h2>
     </div>
-    [% if appendix_sections %]
-    [% for app in appendix_sections %]
-    <div style="margin-bottom:2rem;">
-      <div style="font-family:var(--mono);font-size:0.75rem;color:var(--text-dim);margin-bottom:0.5rem;text-transform:uppercase;letter-spacing:0.08em;">[[ app.label ]]</div>
-      <pre>[[ app.content ]]</pre>
+
+    {% if appendix_sections %}
+    {% for app in appendix_sections %}
+    <div style="margin-bottom: 2rem;">
+      <div style="font-family: var(--mono); font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.08em;">
+        {{ app.label }}
+      </div>
+      <pre>{{ app.content }}</pre>
     </div>
-    [% endfor %]
-    [% else %]
+    {% endfor %}
+    {% else %}
     <p class="empty-state">No raw tool output captured.</p>
-    [% endif %]
+    {% endif %}
   </section>
 
+  <!-- Footer -->
   <footer class="footer">
     <span>Generated by Kira Autonomous Pentest Agent</span>
-    <span>[[ date ]] &nbsp;·&nbsp; [[ target ]]</span>
+    <span>{{ date }} &nbsp;·&nbsp; {{ target }}</span>
   </footer>
 
 </main>
