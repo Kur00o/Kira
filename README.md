@@ -1,17 +1,17 @@
 <div align="center">
 
 ```
-  _  ___
+   _  ___
  | |/ (_)_ _ __ _
- | ' <| | '_/ _` |
- |_|\_\_|_| \__,_|
+  | ' <| | '_/ _` |
+  |_|\_\_|_| \__,_|
 ```
 
 **AUTONOMOUS PENETRATION TESTING AGENT**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Kali%20Linux-557C94?style=flat-square&logo=kalilinux&logoColor=white)](https://kali.org)
-[![LLM](https://img.shields.io/badge/LLM-Gemini%20%7C%20Ollama%20%7C%20Claude%20%7C%20GPT-FF6B35?style=flat-square)](https://ollama.com)
+[![LLM](https://img.shields.io/badge/LLM-Gemini%202.5%20Flash%20%7C%20Gemma%203-FF6B35?style=flat-square)](https://ai.google.dev)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 *LLM-driven agent that autonomously runs the full pentest lifecycle —*
@@ -29,17 +29,51 @@
 Target IP
    │
    ▼
-┌─────────┐   ┌──────────┐   ┌────────────┐   ┌─────────┐   ┌──────────────┐   ┌──────────┐
-│  RECON  │──▶│   ENUM   │──▶│ VULN SCAN  │──▶│ EXPLOIT │──▶│ POST EXPLOIT │──▶│  REPORT  │
-│         │   │          │   │            │   │         │   │              │   │          │
-│ nmap    │   │ gobuster │   │searchsploit│   │   MSF   │   │   linpeas    │   │ HTML+MD  │
-│ 65535   │   │ whatweb  │   │ CVE lookup │   │ modules │   │   privesc    │   │ report   │
-│  ports  │   │ curl     │   │ findings   │   │ shells  │   │    root      │   │          │
-└─────────┘   └──────────┘   └────────────┘   └─────────┘   └──────────────┘   └──────────┘
+┌─────────┐    ┌──────────┐    ┌────────────┐    ┌─────────┐    ┌──────────────┐    ┌──────────────┐
+│  RECON  │───▶│   ENUM   │───▶│ VULN SCAN  │───▶│ EXPLOIT │───▶│ POST EXPLOIT │───▶│    REPORT    │
+│         │    │          │    │            │    │         │    │              │    │              │
+│ nmap    │    │ curl     │    │searchsploit│    │   MSF   │    │   linpeas    │    │  report.html │
+│ 2-stage │    │ whatweb  │    │ CVE lookup │    │ modules │    │   privesc    │    │  report.md   │
+│  scan   │    │ gobuster │    │ findings   │    │ shells  │    │    root      │    └──────────────┘
+└─────────┘    └──────────┘    └────────────┘    └─────────┘    └──────────────┘
 ```
 
-The planner enforces tool sequencing at each phase so the agent never loops or
-gets stuck — even with a small local model like gemma3:4b.
+Kira runs as a **conversational agent** — start it, chat with it, tell it a target, and it runs autonomously. Each phase is driven by an LLM that decides the next tool based on live session state. The planner enforces tool sequencing so the agent never loops.
+
+---
+
+## How It Works
+
+**RECON — Two-stage nmap:**
+1. Fast connect scan on 22 common ports (~5-10s, no root needed)
+2. If nothing found → full sweep of all 65535 ports (~60-120s)
+3. Version scan (`-sV -sC`) runs only on confirmed open ports
+
+**ENUM — Programmatic sequencer:**
+Enforces `curl_probe → whatweb → searchsploit → gobuster_dir` regardless of LLM choice. Prevents the model from looping on already-completed tools.
+
+**VULN SCAN — Searchsploit with fallback:**
+Query chain `Apache httpd 2.4.25` → `Apache 2.4.25` → `Apache 2.4` until results are found. Results converted into scored findings with CVSS and severity.
+
+**EXPLOIT — Real module lookup:**
+Queries live Metasploit RPC for actual module names before attempting exploitation. Never uses hallucinated module paths.
+
+**REPORT — HTML + Markdown:**
+Generated from all findings using a Jinja2 template with LLM-written executive summary and per-finding analysis.
+
+---
+
+## LLM Backends
+
+Kira auto-selects the backend from your `.env`:
+
+| Backend | When used | Model |
+|---------|-----------|-------|
+| **Gemini API** | `GEMINI_API_KEY` is set | `gemini-2.5-flash` |
+| **Ollama (local)** | `GEMINI_API_KEY` is absent | `gemma3:4b` |
+
+To use Gemini: set `GEMINI_API_KEY` in `.env`  
+To use Gemma locally: comment out `GEMINI_API_KEY`, set `OLLAMA_MODEL=gemma3:4b`
 
 ---
 
@@ -47,30 +81,30 @@ gets stuck — even with a small local model like gemma3:4b.
 
 | Tool | Purpose | Install |
 |------|---------|---------|
-| Kali Linux | Recommended OS | — |
-| Python 3.11+ | Runtime | pre-installed on Kali |
-| Nmap | Port scanning | `sudo apt install nmap` |
-| Gobuster | Dir brute-force | `sudo apt install gobuster` |
-| Searchsploit | CVE lookup | `sudo apt install exploitdb` |
-| Metasploit | Exploitation | `sudo apt install metasploit-framework` |
-| enum4linux | SMB enum | `sudo apt install enum4linux` |
-| whatweb | Web fingerprint | `sudo apt install whatweb` |
-| Ollama | Local LLM | [ollama.com](https://ollama.com/install.sh) |
+| **Kali Linux** | Recommended OS | — |
+| **Python 3.11+** | Runtime | pre-installed on Kali |
+| **Nmap** | Port scanning | `sudo apt install nmap` |
+| **Gobuster** | Dir brute-force | `sudo apt install gobuster` |
+| **Searchsploit** | CVE lookup | `sudo apt install exploitdb` |
+| **Metasploit** | Exploitation | `sudo apt install metasploit-framework` |
+| **enum4linux** | SMB enum | `sudo apt install enum4linux` |
+| **WhatWeb** | Web fingerprint | `sudo apt install whatweb` |
+| **Ollama** | Local LLM (optional) | [ollama.com/install](https://ollama.com/install.sh) |
 
 ---
 
-## Setup
+## Setup on Kali
 
-### 1 — Install system tools
+### 1 — System tools
 
 ```bash
 sudo apt update && sudo apt install -y \
     nmap gobuster exploitdb metasploit-framework \
     enum4linux whatweb curl wordlists \
-    python3-pip python3-venv docker.io
+    python3-pip python3-venv
 ```
 
-### 2 — Clone and install Python dependencies
+### 2 — Clone + Python deps
 
 ```bash
 git clone <repo-url> kira
@@ -82,31 +116,26 @@ source venv/bin/activate
 pip install requests rich jinja2 pymetasploit3 python-dotenv
 ```
 
-### 3 — Configure your API key
-
-Create a `.env` file in the project root (never committed to git):
+### 3 — Configure .env
 
 ```bash
-cp .env .env.local   # or just create it manually
+cp .env.example .env   # or edit .env directly
 ```
 
-```env
-# .env
-GEMINI_API_KEY=AIza...
+**Option A — Gemini API (cloud, better reasoning):**
+```ini
+GEMINI_API_KEY=AIzaSy...          # from https://aistudio.google.com/apikey
+GEMINI_MODEL=gemini-2.5-flash
 ```
 
-Get a free Gemini key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-
-Alternatively export it in your shell (no `.env` file needed):
-
-```bash
-echo 'export GEMINI_API_KEY=AIza...' >> ~/.bashrc
-source ~/.bashrc
+**Option B — Ollama/Gemma (local, no API key):**
+```ini
+# Leave GEMINI_API_KEY unset or commented out
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=gemma3:4b
 ```
 
-### 4 — Set up Ollama (local model, optional)
-
-Only needed if you want to run without a cloud API key.
+### 4 — Ollama setup (if using local model)
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -116,33 +145,30 @@ ollama pull gemma3:4b
 
 ### 5 — Start Metasploit RPC
 
-Required for the EXPLOIT phase. Skip with `--no-msf` if you only want recon/enum.
-
 ```bash
 msfrpcd -P kirapass -p 55553 -a 127.0.0.1 -f
 
-# Verify it's listening
+# Verify
 ss -tlnp | grep 55553
 ```
 
-### 6 — Verify
+### 6 — Verify everything
 
 ```bash
 nmap --version
 gobuster version
 searchsploit --version
 msfconsole --version
+curl http://localhost:11434/api/tags   # Ollama only
 ```
 
 ---
 
 ## Test Target — DVWA
 
-[DVWA](https://github.com/digininja/DVWA) (Damn Vulnerable Web Application) is
-the target used for development and testing of Kira. It runs Apache + PHP with
-intentional vulnerabilities and is safe to attack in a lab environment.
+[DVWA](https://github.com/digininja/DVWA) is the recommended target for testing Kira.
 
-### Spin up DVWA with Docker
+### Docker (fastest)
 
 ```bash
 sudo systemctl start docker
@@ -152,129 +178,127 @@ sudo docker run -d \
     --name dvwa \
     vulnerables/web-dvwa
 
-# Confirm it's up
 curl -s http://127.0.0.1:8080/ | grep -i dvwa
 ```
 
-### Configure DVWA
+### Manual install on Kali
 
-1. Open `http://127.0.0.1:8080/` in a browser
-2. Login with `admin` / `password`
-3. Go to **Setup / Reset DB** → click **Create / Reset Database**
-4. Go to **DVWA Security** → set level to **Low**
+```bash
+sudo apt install -y apache2 php php-mysqli mariadb-server
+
+sudo git clone https://github.com/digininja/DVWA /var/www/html/dvwa
+sudo cp /var/www/html/dvwa/config/config.inc.php.dist \
+        /var/www/html/dvwa/config/config.inc.php
+sudo sed -i "s/p\@ssw0rd//" /var/www/html/dvwa/config/config.inc.php
+sudo chmod -R 777 /var/www/html/dvwa/hackable/uploads/
+sudo systemctl start apache2 mariadb
+```
+
+Visit `http://127.0.0.1/dvwa/setup.php` → **Create / Reset Database**  
+Login: `admin` / `password` → set security level to **Low**
 
 ---
 
 ## Running Kira
 
-Activate the venv first:
-
 ```bash
 source venv/bin/activate
+
+# Basic — interactive mode, provide target via chat
+sudo -E venv/bin/python main.py
+
+# With target pre-set
+sudo -E venv/bin/python main.py --target 10.163.172.51 --authorized-by "Lab VM"
+
+# No Metasploit
+sudo -E venv/bin/python main.py --target 10.163.172.51 --authorized-by "Lab VM" --no-msf
+
+# More iterations
+sudo -E venv/bin/python main.py --target 10.163.172.51 --authorized-by "Lab VM" --max-iter 50
+
+# Override model
+sudo -E venv/bin/python main.py --target 10.163.172.51 --authorized-by "Lab VM" --model gemini-2.5-pro
 ```
 
-**Against local DVWA (Gemini — recommended):**
+### Chat interface
+
+Once running, Kira presents a conversational prompt:
+
+```
+kira> find vulnerabilities at 10.163.172.51
+```
+
+Kira detects the IP + trigger word and starts the autonomous scan. You can control the iteration count inline:
+
+```
+kira> find vulnerabilities at 10.163.172.51 iterations = 50
+kira> scan 10.163.172.51 iter=100
+kira> start pentest on 10.163.172.51 max_iter=30
+```
+
+You can also ask questions at any time:
+
+```
+kira> what is CVE-2021-41773?
+kira> explain the findings so far
+kira> what should I do next?
+kira> show report
+kira> open report
+```
+
+Type `exit` to quit.
+
+### View the report
+
 ```bash
-python main.py \
-  --target 127.0.0.1 \
-  --authorized-by "Local DVWA lab" \
-  --provider gemini
+xdg-open sessions/*/report.html
 ```
-
-**Against a DVWA VM on your LAN:**
-```bash
-python main.py \
-  --target 10.163.172.51 \
-  --authorized-by "Lab VM" \
-  --provider gemini
-```
-
-**With Ollama on a separate GPU machine on your LAN:**
-```bash
-python main.py \
-  --target 10.163.172.51 \
-  --authorized-by "Lab VM" \
-  --ollama-host http://10.163.172.253:11434
-```
-
-**Enumeration only — no Metasploit:**
-```bash
-python main.py \
-  --target 10.163.172.51 \
-  --authorized-by "Lab VM" \
-  --provider gemini \
-  --no-msf
-```
-
-**More iterations + verbose tool output:**
-```bash
-python main.py \
-  --target 10.163.172.51 \
-  --authorized-by "Lab VM" \
-  --provider gemini \
-  --max-iter 30 \
-  --verbose
-```
-
-**Open the report when done:**
-```bash
-xdg-open sessions/10_163_172_51_*/report.html
-```
-
----
-
-## LLM Providers
-
-| Provider | Flag | Key env var | Notes |
-|----------|------|-------------|-------|
-| **Gemini** | `--provider gemini` | `GEMINI_API_KEY` | Recommended — free tier, large context |
-| Ollama (local) | *(default)* | — | No internet needed, needs GPU |
-| Anthropic Claude | `--provider anthropic` | `ANTHROPIC_API_KEY` | Best reasoning, paid |
-| OpenAI | `--provider openai` | `OPENAI_API_KEY` | Paid |
-
-Recommended models by provider:
-- Gemini: `gemini-2.0-flash` (default) or `gemini-2.5-pro`
-- Ollama: `gemma3:12b` or `qwen2.5-coder:14b` (4b works but loops more)
-- Claude: `claude-haiku-4-5-20251001`
-- OpenAI: `gpt-4o-mini`
-
-Override the model with `--model <name>`.
 
 ---
 
 ## CLI Reference
 
 ```
-python main.py --target IP --authorized-by "TEXT" [OPTIONS]
+sudo -E venv/bin/python main.py [OPTIONS]
 
-  --target IP              Target IP address
-  --authorized-by TEXT     Written authorization statement (required)
+Target:
+  --target IP              Target IP (optional — can be set via chat)
+  --authorized-by TEXT     Authorization statement (optional — prompted if omitted)
 
-  --provider PROVIDER      gemini | ollama | anthropic | openai  (default: ollama)
-  --ollama-host URL        Ollama URL  (default: http://localhost:11434)
-  --model MODEL            Override model name
-  --api-key KEY            API key (or set via .env / env var)
+LLM:
+  --api-key KEY            Gemini API key (overrides GEMINI_API_KEY env var)
+  --model MODEL            Override model (e.g. gemini-2.5-pro, gemma3:12b)
 
-  --max-iter N             Max agent loop iterations  (default: 20)
+Scan:
+  --max-iter N             Max agent loop iterations (default: 20)
   --session-dir PATH       Custom session directory
-  --no-msf                 Disable Metasploit
+  --no-msf                 Disable Metasploit (RECON → VULN_SCAN only)
   --no-report              Skip report generation
-  --verbose / -v           Stream tool output to terminal
+
+Metasploit RPC:
+  --msf-host HOST          msfrpcd host (default: 127.0.0.1)
+  --msf-port PORT          msfrpcd port (default: 55553)
+  --msf-pass PASS          msfrpcd password (default: kirapass)
+  --msf-no-ssl             Disable SSL for msfrpcd
+
+Output:
+  --verbose / -v           Stream raw tool output
+  --version                Print version and exit
 ```
 
 ---
 
 ## Session Output
 
-Every run saves a timestamped session directory:
+Every run creates a timestamped directory under `sessions/`:
 
 ```
-sessions/10_163_172_51_20260410_120000/
-├── state.json       full agent state — findings, ports, sessions
-├── actions.jsonl    every tool call with args, result, and timing
-├── kira.log         phase transitions, errors, events
-├── report.md        markdown pentest report
-├── report.html      HTML report — open in browser
+sessions/kira_20260415_120000/
+├── state.json       ← full agent state (findings, ports, sessions)
+├── actions.jsonl    ← every tool call with args, result, timing
+├── kira.log         ← phase transitions, errors, events
+├── report.md        ← markdown pentest report
+├── report.html      ← HTML report (open in browser)
 └── raw/
     ├── nmap_*.xml
     ├── gobuster_*.txt
@@ -286,50 +310,57 @@ sessions/10_163_172_51_20260410_120000/
 ## Architecture
 
 ```
-main.py  ──▶  Planner.run()
+main.py  ──▶  KiraChat.start()
                │
-               ├── LLMClient.next_action()     gemini / ollama / anthropic / openai
-               │    └── SYSTEM_PROMPT + state context → JSON action
+               ├── chat mode: LLM.generate_text() — free-form Q&A
                │
-               ├── ScopeGuard.check_action()   blocks out-of-scope targets
-               │
-               ├── ENUM sequencer              enforces tool order regardless of LLM
-               │
-               ├── Planner._dispatch()
-               │    ├── ToolRunner.nmap()       two-stage: full sweep + version scan
-               │    ├── ToolRunner.gobuster()
-               │    ├── ToolRunner.searchsploit()
-               │    ├── ToolRunner.whatweb() / curl()
-               │    ├── MSFClient.search()      validates module names via live RPC
-               │    ├── MSFClient.run_module()  exploit + session tracking
-               │    └── ToolRunner.shell_cmd()  post-exploit commands
-               │
-               ├── KnowledgeBase.add()          dedup findings by (title, port)
-               ├── StateManager.update()        persist to state.json
-               └── PhaseController             auto-advance phases
+               └── scan trigger: Planner.run()
+                    │
+                    ├── LLMClient.next_action()
+                    │    ├── Gemini REST API  (if GEMINI_API_KEY set)
+                    │    └── Ollama /api/generate  (fallback)
+                    │
+                    ├── ENUM sequencer  (curl → whatweb → searchsploit → gobuster)
+                    │
+                    ├── ScopeGuard.check_action()
+                    │
+                    ├── Planner._dispatch()
+                    │    ├── ToolRunner.nmap()        two-stage discovery
+                    │    ├── ToolRunner.gobuster()
+                    │    ├── ToolRunner.searchsploit() query fallback chain
+                    │    ├── ToolRunner.whatweb()
+                    │    ├── ToolRunner.curl()
+                    │    ├── MSFClient.search()       real module lookup
+                    │    ├── MSFClient.run_module()   exploit + session tracking
+                    │    └── ToolRunner.shell_cmd()   post-exploit
+                    │
+                    ├── KnowledgeBase.add()    dedup findings by (title, port)
+                    ├── StateManager.update()  persist to state.json
+                    └── PhaseController        auto-advance phases
 ```
 
 ---
 
 ## Troubleshooting
 
-**nmap SYN scan needs root:**
+**nmap permission denied:**
 ```bash
-sudo python main.py --target 10.163.172.51 --authorized-by "Lab VM" --provider gemini
+sudo -E venv/bin/python main.py --target <IP> --authorized-by "Lab VM"
 ```
 
-**Gemini key not found:**
+**Gemini API key error:**
 ```bash
-# Check your .env has the key
-cat .env | grep GEMINI
-# Or export directly
-export GEMINI_API_KEY=AIza...
+# Check key is set
+echo $GEMINI_API_KEY
+# Or test directly
+python -c "from kira.llm import LLMClient; c = LLMClient(); print(c.ping())"
 ```
 
 **Ollama not reachable:**
 ```bash
 ollama serve
 curl http://localhost:11434/api/tags
+ollama pull gemma3:4b
 ```
 
 **Gobuster wordlist missing:**
@@ -344,11 +375,15 @@ msfrpcd -P kirapass -p 55553 -a 127.0.0.1 -f
 ss -tlnp | grep 55553
 ```
 
-**DVWA Docker not starting:**
+**Report not generating:**
 ```bash
-sudo systemctl start docker
-sudo docker ps -a
-sudo docker logs dvwa
+pip install jinja2
+# Check for template errors in the output — they are now printed with traceback
+```
+
+**Review why a session stopped:**
+```bash
+cat sessions/<dir>/actions.jsonl | python3 -m json.tool | less
 ```
 
 ---
@@ -357,11 +392,14 @@ sudo docker logs dvwa
 
 Kira is built for **authorized security testing only**.
 
-- `--authorized-by` is required — Kira will not start without it
-- A scope guard prevents scanning IPs outside the authorized target
+- `--authorized-by` is required — Kira prompts for it if not provided
+- A scope guard blocks scanning IPs outside the authorized target
 - Destructive shell commands are blocked even on live sessions
-- All actions are permanently logged to `kira.log`
+- All actions are permanently logged to `actions.jsonl` and `kira.log`
 
-Only use Kira against systems you own, lab VMs, or CTF machines you are
-explicitly assigned to test. Unauthorized access to computer systems is
-illegal regardless of intent.
+**Only use Kira against:**
+- Your own machines and lab VMs
+- CTF platforms (HTB, VulnHub, TryHackMe) on machines you are assigned
+- Systems you have explicit written permission to test
+
+Unauthorized access to computer systems is illegal regardless of intent.

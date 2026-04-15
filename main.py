@@ -1,17 +1,15 @@
 """
 main.py — Kira Autonomous Penetration Testing Agent
 =====================================================
-CLI entry point with conversational interface via KiraChat.
-Start without arguments and interact conversationally:
-  - Chat with Kira (ask security questions)
-  - Tell Kira to scan a target (e.g., "Find vulnerabilities on 10.10.10.5")
-  - Get results interactively
-Uses Google Gemini LLM (configure via GOOGLE_API_KEY environment variable).
+CLI entry point. Wires all modules together and launches the Planner loop.
 
 Usage:
     python main.py
-    python main.py --authorized-by "My Organization" --no-msf --verbose
-    python main.py --session-dir ./my_session
+    python main.py --target 10.10.10.5 --authorized-by "Lab VM"
+    python main.py --target 10.10.10.5 --authorized-by "HTB" --api-key AIzaSy...
+    python main.py --target 10.10.10.5 --authorized-by "test" --no-msf --verbose
+
+Requires GEMINI_API_KEY set in .env or environment.
 """
 
 import argparse
@@ -165,9 +163,19 @@ def _make_session_dir(target: str, custom: str = None) -> Path:
 # ── LLM factory ───────────────────────────────────────────────────────────────
 
 def build_llm(args, verbose: bool) -> LLMClient:
-    """Construct LLMClient from env variable. Prints clear error on failure."""
+    """Construct Gemini LLMClient from env vars and CLI args."""
+    api_key = (getattr(args, "api_key", None) or os.getenv("GEMINI_API_KEY", "")).strip()
+    model   = getattr(args, "model", None) or os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or None
+
+    if not api_key:
+        _die(
+            "No Gemini API key found.\n"
+            "Set GEMINI_API_KEY in your .env file:\n"
+            "  GEMINI_API_KEY=AIzaSy..."
+        )
+
     try:
-        return LLMClient(verbose=verbose)
+        return LLMClient(api_key=api_key, model=model, verbose=verbose)
     except ValueError as e:
         _die(str(e))
 
@@ -379,7 +387,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  python main.py --session-dir ./my_session\n"
             "\n"
             "  [!] Chat with Kira to set targets and trigger scans.\n"
-            "  [!] Set GOOGLE_API_KEY environment variable before running."
+            "  [!] Set GEMINI_API_KEY in .env before running."
         ),
     )
 
@@ -390,8 +398,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Authorization identifier (default: 'Lab VM')")
 
     # LLM (Gemini)
+    parser.add_argument("--api-key", default=None,
+                        help="Gemini API key (overrides GEMINI_API_KEY env var)")
     parser.add_argument("--model", default=None,
-                        help="Override Gemini model name")
+                        help="Override Gemini model (default: gemini-2.5-flash)")
 
     # Session
     parser.add_argument("--session-dir", default=None,
@@ -450,7 +460,7 @@ def main():
 
     # ── Startup info ───────────────────────────────────────────────────────────
     print(f"  Authorized by : {C.GREEN}{args.authorized_by}{C.RESET}")
-    print(f"  LLM           : Google Gemini (via GOOGLE_API_KEY env var)")
+    print(f"  Gemini model  : {args.model or os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print(f"  MSF           : {'disabled (--no-msf)' if args.no_msf else f'{args.msf_host}:{args.msf_port}'}")
     print()
 
@@ -473,7 +483,7 @@ def main():
 
     # ── ToolRunner + KnowledgeBase ────────────────────────────────────────────
     runner = ToolRunner(session_dir=str(session_dir),
-                        verbose=verbose, msf=msf_client)
+                        verbose=False, msf=msf_client)
     kb = KnowledgeBase() if _KB_AVAILABLE else None
 
     avail   = runner.check_tools()
@@ -484,21 +494,60 @@ def main():
     if missing:
         print(f"{C.YELLOW}[WARN ] Missing:   {', '.join(missing)}{C.RESET}")
 
+    # ── StateManager ──────────────────────────────────────────────────────────
+    # Use a placeholder target until the user provides one via chat.
+    # KiraChat.re-inits state when a real target is given.
+    initial_target = args.target or ""
+    state = StateManager(session_dir=str(session_dir))
+    state.init(
+        target=initial_target or "pending",
+        authorized_by=args.authorized_by,
+    )
+
+    # ── Scope guardrails ──────────────────────────────────────────────────────
+    # Only validate target if one was provided on the CLI.
+    # If no target yet, create a permissive guard that validates per-action.
+    if initial_target:
+        guard = ScopeGuard(authorized_target=initial_target, authorized_by=args.authorized_by)
+        guard.validate_startup(log)
+    else:
+        guard = None  # KiraChat will create a real guard when target is set
+
+    # ── Phase transition logger hook ──────────────────────────────────────────
+    _orig_advance = state.advance_phase
+    def _logged_advance():
+        old = state.phase
+        new = _orig_advance()
+        if new != old:
+            log.phase(old, new)
+            _print_section(f"PHASE: {old} → {new}")
+        return new
+    state.advance_phase = _logged_advance
+
+    # ── Planner ────────────────────────────────────────────────────────────────
+    planner = Planner(
+        state=state,
+        runner=runner,
+        llm=llm,
+        msf=msf_client,
+        kb=kb,
+        verbose=True,   # always show step-by-step output
+        logger=log,
+        guard=guard,
+    )
+
     # ── Start KiraChat ─────────────────────────────────────────────────────────
     _print_section("KIRA CHAT")
-    
+
     try:
         chat = KiraChat(
-            runner=runner,
+            planner=planner,
+            state=state,
             llm=llm,
-            msf=msf_client,
-            kb=kb,
-            session_dir=session_dir,
-            log=log,
-            authorized_by=args.authorized_by,
             max_iter=args.max_iter,
             verbose=args.verbose,
-            initial_target=args.target,  # Optional target from CLI
+            session_dir=session_dir,
+            log=log,
             no_report=args.no_report,
         )
         chat.start()

@@ -556,9 +556,12 @@ class ReportGenerator:
             template = env.get_template(self.TEMPLATE_PATH.name)
             html = template.render(**template_vars)
         except ImportError:
-            # Jinja2 not installed — use fallback inline renderer
             html = self._render_html_fallback(template_vars)
         except Exception as e:
+            # Surface the actual error instead of silently falling back
+            import traceback
+            print(f"[REPORT] Jinja2 render error: {e}")
+            traceback.print_exc()
             html = self._render_html_fallback(template_vars)
 
         out_path.write_text(html, encoding="utf-8")
