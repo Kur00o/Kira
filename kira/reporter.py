@@ -552,13 +552,24 @@ class ReportGenerator:
             env = Environment(
                 loader=FileSystemLoader(str(template_dir)),
                 autoescape=select_autoescape(["html"]),
+                # Use different block/variable delimiters to avoid clashing
+                # with CSS custom properties like var(--critical)
+                variable_start_string="[[",
+                variable_end_string="]]",
+                block_start_string="[%",
+                block_end_string="%]",
+                comment_start_string="[#",
+                comment_end_string="#]",
             )
             template = env.get_template(self.TEMPLATE_PATH.name)
             html = template.render(**template_vars)
         except ImportError:
-            # Jinja2 not installed — use fallback inline renderer
             html = self._render_html_fallback(template_vars)
         except Exception as e:
+            # Log the actual error so it's visible
+            import traceback
+            print(f"[reporter] Jinja2 render error: {e}")
+            traceback.print_exc()
             html = self._render_html_fallback(template_vars)
 
         out_path.write_text(html, encoding="utf-8")
@@ -615,7 +626,7 @@ class ReportGenerator:
 def _patch_llm_generate_text(llm) -> None:
     """
     If the LLMClient doesn't have generate_text(), add it dynamically.
-    generate_text() is the non-JSON mode used by the reporter.
+    Uses the same Gemini endpoint as the main client.
     """
     if llm is None or hasattr(llm, "generate_text"):
         return
@@ -623,27 +634,23 @@ def _patch_llm_generate_text(llm) -> None:
     import types
 
     def generate_text(self, prompt: str, temperature: float = 0.3, max_tokens: int = 500) -> str:
-        """
-        Send a free-text prompt and return the raw string response.
-        Unlike ask(), does NOT enforce JSON output.
-        """
         import requests as _req
         payload = {
-            "model":  self.model,
-            "stream": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
-            "messages": [{"role": "user", "content": prompt}],
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
         }
         try:
-            resp = _req.post(
-                f"{self.host}/api/chat",
-                json=payload,
-                timeout=self.timeout,
+            url = (
+                f"{self.base_url}/v1beta/models/{self.model}"
+                f":generateContent?key={self.api_key}"
             )
+            resp = _req.post(url, headers={"Content-Type": "application/json"},
+                             json=payload, timeout=60)
             resp.raise_for_status()
-            data = resp.json()
-            return data.get("message", {}).get("content", "").strip()
-        except Exception as e:
+            return (resp.json().get("candidates", [{}])[0]
+                    .get("content", {}).get("parts", [{}])[0]
+                    .get("text", "").strip())
+        except Exception:
             return ""
 
     llm.generate_text = types.MethodType(generate_text, llm)

@@ -78,11 +78,12 @@ Required keys:
 
 RULES:
 1. Never repeat a tool+args combo already in recent actions.
-2. In ENUM: run curl_probe → whatweb → gobuster_dir → searchsploit (short query e.g. "apache 2.4").
-3. In EXPLOIT: call msf_search FIRST, then use a module name from its results.
-4. Never invent Metasploit module names. Only use names returned by msf_search.
-5. Always include the correct port in URLs (e.g. http://IP:8080/ not http://IP/).
-6. If stuck with no valid action, emit HALT.
+2. In RECON: if nmap returns 0 open ports, retry with flags="-Pn -sT -T4" (skips host discovery). Never HALT just because one scan found nothing.
+3. In ENUM: run curl_probe → whatweb → gobuster_dir → searchsploit (short query e.g. "apache 2.4").
+4. In EXPLOIT: call msf_search FIRST, then use a module name from its results.
+5. Never invent Metasploit module names. Only use names returned by msf_search.
+6. Always include the correct port in URLs (e.g. http://IP:8080/ not http://IP/).
+7. If stuck with no valid action, emit HALT.
 
 TOOLS:
   nmap_scan     : {"target":"IP","flags":"-sV -sC"} — omit "ports" to scan all 65535 ports

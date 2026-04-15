@@ -37,9 +37,11 @@ class PhaseController:
 
     PHASE_FOCUS = {
         "RECON": (
-            "Run nmap_scan with no ports argument to trigger a full 65535-port sweep "
-            "followed by a targeted version scan on discovered ports. "
-            "Goal: find every open port and its service version."
+            "Run nmap_scan against the target. "
+            "The default port list covers the most common ports including 8080. "
+            "If the first scan returns 0 open ports, do NOT halt — try again with "
+            "flags='-sT -T4' (connect scan, no root needed) or try flags='-Pn -sT -T4' "
+            "to skip host discovery. Only HALT if multiple scan attempts all fail with errors."
         ),
         "ENUM": (
             "Enumerate each discovered service. For HTTP services, run tools in this order: "
@@ -299,81 +301,66 @@ class Planner:
     # ── Tool implementations ─────────────────────────────────────────────────
 
     def _do_nmap(self, args: dict, target: str) -> str:
-        tgt = args.get("target", target)
-        flags = args.get("flags", "-sV -sC")
-        ports_arg = _normalize_ports_arg(args.get("ports"))
+        tgt   = args.get("target", target)
+        flags = args.get("flags", "-sV -sC -T4")
+        ports = _normalize_ports_arg(args.get("ports")) or NMAP_DEFAULT_PORTS
 
-        # ── Two-stage RECON ───────────────────────────────────────────────
-        # Stage 1: fast SYN scan across all 65535 ports (no version detection)
-        # Stage 2: targeted -sV -sC only on the open ports found
-        # Skip stage 1 if caller explicitly passed a port list or we already
-        # have open ports in state (e.g. re-running nmap in a later phase).
-        existing_ports = list(self._state.get("open_ports") or [])
-        run_full_scan = (
-            not ports_arg
-            and not existing_ports
-            and self._state.phase == "RECON"
-        )
+        if self._verbose:
+            self._print_info(f"nmap {flags} -p {ports} {tgt}")
 
-        if run_full_scan:
+        result = self._runner.nmap(target=tgt, flags=flags, ports=ports)
+
+        # ── Failure: log full detail so we can diagnose ───────────────────
+        if not result.ok:
+            detail = (result.stderr or result.stdout or result.error or "no output")[:300]
+            msg = f"nmap FAILED (rc={result.returncode}, timeout={result.timed_out}): {detail}"
             if self._verbose:
-                self._print_info("Stage 1: full port sweep (all 65535 ports, no version)...")
-            sweep = self._runner.nmap(
-                target=tgt,
-                flags="-sS -T4 --min-rate 5000 --open",
-                ports=NMAP_FULL_PORTS,
-                timeout=300,
-            )
+                self._print_warn(msg)
+            # Retry with a plain connect scan (no scripts, no version) — works without root
+            if self._verbose:
+                self._print_info("Retrying with -sT (connect scan, no root needed)...")
+            result = self._runner.nmap(target=tgt, flags="-sT -T4", ports=ports)
+            if not result.ok:
+                return f"nmap failed: {(result.stderr or result.error or 'unknown error')[:200]}"
+
+        # ── No XML artifact — parse stdout as fallback ────────────────────
+        if not result.artifact_path:
+            import re
             discovered = []
-            if sweep.ok and sweep.artifact_path:
-                try:
-                    from kira.parsers.nmap_parser import parse_nmap_xml, extract_state_fields
-                    parsed = parse_nmap_xml(sweep.artifact_path)
-                    fields = extract_state_fields(parsed)
-                    discovered = fields.get("open_ports", [])
-                except Exception:
-                    pass
+            for line in (result.stdout or "").splitlines():
+                m = re.match(r"(\d+)/tcp\s+open", line)
+                if m:
+                    discovered.append(int(m.group(1)))
+            if discovered:
+                self._state.update(open_ports=discovered)
+                return f"Found {len(discovered)} open ports (stdout parse): {discovered}"
+            return f"nmap ran but no XML output and no open ports in stdout. raw: {result.summary}"
 
-            if not discovered:
-                # Fallback: parse from stdout if XML failed
-                import re
-                for line in (sweep.stdout or "").splitlines():
-                    m = re.match(r"(\d+)/tcp\s+open", line)
-                    if m:
-                        discovered.append(int(m.group(1)))
-
-            if not discovered:
-                return f"Stage 1 sweep found no open ports on {tgt}. rc={sweep.returncode}"
-
-            ports_arg = ",".join(str(p) for p in sorted(discovered))
-            if self._verbose:
-                self._print_info(f"Stage 1 found {len(discovered)} open ports: {discovered}")
-                self._print_info(f"Stage 2: version scan on ports {ports_arg}...")
-
-        # Stage 2 (or single-stage if ports were specified)
-        use_ports = ports_arg or NMAP_HEAVY_PORTS
-        result = self._runner.nmap(target=tgt, flags=flags, ports=use_ports)
-        if result.ok and result.artifact_path:
-            try:
-                from kira.parsers.nmap_parser import (
-                    parse_nmap_xml,
-                    extract_state_fields,
-                    get_notable_script_findings,
-                )
-                parsed = parse_nmap_xml(result.artifact_path)
-                fields = extract_state_fields(parsed)
-                self._state.update(**fields)
-                if self._kb:
-                    for f in get_notable_script_findings(parsed):
-                        self._kb.add_from_dict(f)
-                return (
-                    f"Found {len(fields.get('open_ports', []))} open ports: "
-                    f"{fields.get('open_ports', [])}. "
-                    f"Services: {list(fields.get('services', {}).values())[:5]}"
-                )
-            except Exception as e:
-                return f"nmap OK but parse failed: {e}. raw: {result.summary}"
-        return result.summary
+        # ── Parse XML ─────────────────────────────────────────────────────
+        try:
+            from kira.parsers.nmap_parser import (
+                parse_nmap_xml,
+                extract_state_fields,
+                get_notable_script_findings,
+            )
+            parsed = parse_nmap_xml(result.artifact_path)
+            fields = extract_state_fields(parsed)
+            self._state.update(**fields)
+            if self._kb:
+                for f in get_notable_script_findings(parsed):
+                    self._kb.add_from_dict(f)
+            open_ports = fields.get("open_ports", [])
+            services   = list(fields.get("services", {}).values())[:5]
+            if not open_ports:
+                # Log raw stdout so we can see what nmap actually said
+                preview = (result.stdout or "")[:400]
+                return f"nmap OK but 0 open ports found. stdout preview: {preview}"
+            return (
+                f"Found {len(open_ports)} open ports: {open_ports}. "
+                f"Services: {services}"
+            )
+        except Exception as e:
+            return f"nmap OK but parse failed: {e}. raw: {result.summary}"
 
     def _do_gobuster(self, args: dict) -> str:
         raw_url = args.get("url") or _default_http_url(self._state)
@@ -902,8 +889,8 @@ def _normalize_http_tool_url(url: str, state) -> str:
     return urlunparse((scheme, netloc, pth, "", parsed.query, parsed.fragment))
 
 
-NMAP_HEAVY_PORTS = "22,25,53,80,443,3128,4443,4444,8090,8443"
-NMAP_FULL_PORTS  = "-"   # all 65535 ports
+NMAP_DEFAULT_PORTS = "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1723,3306,3389,5900,8080,8443,8888"
+NMAP_FULL_PORTS    = "-"   # kept for reference, not used by default
 
 
 def _normalize_ports_arg(ports: Optional[str]) -> Optional[str]:
