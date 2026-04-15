@@ -1,17 +1,15 @@
 """
 main.py — Kira Autonomous Penetration Testing Agent
 =====================================================
-CLI entry point. Wires all Day 1-3 modules together and launches
-the Planner loop autonomously — no human input after startup.
+CLI entry point. Wires all modules together and launches the Planner loop.
 
 Usage:
+    python main.py
     python main.py --target 10.10.10.5 --authorized-by "Lab VM"
-    python main.py --target 10.10.10.5 --authorized-by "HTB" --ollama-host http://host:11434
+    python main.py --target 10.10.10.5 --authorized-by "HTB" --api-key AIzaSy...
     python main.py --target 10.10.10.5 --authorized-by "test" --no-msf --verbose
 
-Merge resolution: kept development branch entirely.
-All inline classes (StateManager, ToolExecutor, LLMPlanner, KiraAgent)
-from main branch discarded — replaced by kira.* module imports.
+Requires GEMINI_API_KEY set in .env or environment.
 """
 
 import argparse
@@ -21,12 +19,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── Load .env file if present ─────────────────────────────────────────────────
+# Load environment variables from .env file
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # dotenv optional — fall back to real env vars
+    pass  # python-dotenv not required if env vars are already set
 
 
 # ── Kira package root ─────────────────────────────────────────────────────────
@@ -49,14 +47,14 @@ except ImportError as e:
     # Fallback for legacy execution contexts where modules are imported
     # from a flat path.
     try:
-        from state       import StateManager
-        from llm         import LLMClient
-        from tool_runner import ToolRunner
-        from findings    import KnowledgeBase
-        from planner     import Planner
-        from logger      import KiraLogger
-        from reporter    import ReportGenerator
-        from guardrails  import ScopeGuard
+        from kira.state       import StateManager
+        from kira.llm         import LLMClient
+        from kira.tool_runner import ToolRunner
+        from kira.findings    import KnowledgeBase
+        from kira.planner     import Planner
+        from kira.logger      import KiraLogger
+        from kira.reporter    import ReportGenerator
+        from kira.guardrails  import ScopeGuard
     except ImportError:
         print(f"[ERROR] Failed to import Kira module: {e}")
         print("        Run from the repository root with: python main.py ...")
@@ -165,33 +163,19 @@ def _make_session_dir(target: str, custom: str = None) -> Path:
 # ── LLM factory ───────────────────────────────────────────────────────────────
 
 def build_llm(args, verbose: bool) -> LLMClient:
-    """Construct LLMClient from CLI args. Prints clear error on failure."""
-    provider = args.provider or "ollama"
-    kwargs   = {
-        "provider": provider,
-        "verbose":  verbose,
-    }
-    if args.model:
-        kwargs["model"] = args.model
-    if provider == "ollama":
-        kwargs["host"] = args.ollama_host
-    elif provider in ("anthropic", "openai", "gemini"):
-        env_var = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai":    "OPENAI_API_KEY",
-            "gemini":    "GEMINI_API_KEY",
-        }[provider]
-        key = args.api_key or os.getenv(env_var, "")
-        if not key:
-            _die(
-                f"Provider '{provider}' requires an API key.\n"
-                f"Pass --api-key or set the environment variable:\n"
-                f"  export {env_var}=your-key-here"
-            )
-        kwargs["api_key"] = key
+    """Construct Gemini LLMClient from env vars and CLI args."""
+    api_key = (getattr(args, "api_key", None) or os.getenv("GEMINI_API_KEY", "")).strip()
+    model   = getattr(args, "model", None) or os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or None
+
+    if not api_key:
+        _die(
+            "No Gemini API key found.\n"
+            "Set GEMINI_API_KEY in your .env file:\n"
+            "  GEMINI_API_KEY=AIzaSy..."
+        )
 
     try:
-        return LLMClient(**kwargs)
+        return LLMClient(api_key=api_key, model=model, verbose=verbose)
     except ValueError as e:
         _die(str(e))
 
@@ -394,42 +378,36 @@ def _die(msg: str) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kira",
-        description="Kira \u2014 Autonomous Penetration Testing Agent",
+        description="Kira \u2014 Autonomous Pentesting Agent (Conversational)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python main.py --target 10.10.10.5 --authorized-by 'HTB Lab'\n"
-            "  python main.py --target 10.10.10.5 --authorized-by 'test' --no-msf\n"
-            "  python main.py --target 10.10.10.5 --authorized-by 'test' --provider anthropic\n"
+            "  python main.py\n"
+            "  python main.py --authorized-by 'HTB Lab' --no-msf --verbose\n"
+            "  python main.py --session-dir ./my_session\n"
             "\n"
-            "  [!] Only use against targets you are explicitly authorized to test."
+            "  [!] Chat with Kira to set targets and trigger scans.\n"
+            "  [!] Set GEMINI_API_KEY in .env before running."
         ),
     )
 
-    # Required
-    parser.add_argument("--target", "-t", required=True,
-                        help="Target IP address or hostname")
-    parser.add_argument("--authorized-by", required=True, metavar="AUTHORIZATION",
-                        help="Required: written confirmation of authorization")
+    # Optional: can be provided but target will be discovered through chat
+    parser.add_argument("--target", "-t", default=None,
+                        help="(Optional) Target IP address or hostname — can be set via chat")
+    parser.add_argument("--authorized-by", default="Lab VM", metavar="AUTHORIZATION",
+                        help="Authorization identifier (default: 'Lab VM')")
 
-    # LLM
-    parser.add_argument("--provider", default=None,
-                        choices=["ollama", "anthropic", "openai", "gemini"],
-                        help="LLM provider (default: ollama)")
-    parser.add_argument("--ollama-host",
-                        default=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
-                        metavar="URL",
-                        help="Ollama API URL (default: http://localhost:11434)")
-    parser.add_argument("--model", default=None,
-                        help="Override model name")
+    # LLM (Gemini)
     parser.add_argument("--api-key", default=None,
-                        help="API key for Anthropic or OpenAI")
+                        help="Gemini API key (overrides GEMINI_API_KEY env var)")
+    parser.add_argument("--model", default=None,
+                        help="Override Gemini model (default: gemini-2.5-flash)")
 
     # Session
     parser.add_argument("--session-dir", default=None,
                         help="Custom session directory (auto-generated if not set)")
     parser.add_argument("--max-iter", type=int, default=20, metavar="N",
-                        help="Maximum planner loop iterations (default: 20)")
+                        help="Maximum planner loop iterations per scan (default: 20)")
 
     msf = parser.add_argument_group("Metasploit RPC (optional)")
     msf.add_argument("--no-msf", action="store_true",
@@ -467,29 +445,24 @@ def main():
 
     verbose = args.verbose
 
-    # ── Session directory ──────────────────────────────────────────────────────
-    session_dir = _make_session_dir(args.target, args.session_dir)
+    # ── Session directory — generic (no target in name yet) ──────────────────────
+    if args.session_dir:
+        session_dir = Path(args.session_dir)
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        session_dir = Path("sessions") / f"kira_{stamp}"
+    session_dir.mkdir(parents=True, exist_ok=True)
     _print_ok(f"Session dir: {session_dir}")
 
     # ── KiraLogger ─────────────────────────────────────────────────────────────
     log = KiraLogger(session_dir=str(session_dir), verbose=verbose)
-    log.info(f"Kira session started — target={args.target}")
+    log.info("Kira session started (conversational mode)")
 
-    # ── 1. Startup info ───────────────────────────────────────────────────────
-    print(f"  Target        : {C.CYAN}{args.target}{C.RESET}")
+    # ── Startup info ───────────────────────────────────────────────────────────
     print(f"  Authorized by : {C.GREEN}{args.authorized_by}{C.RESET}")
-    print(f"  Ollama host   : {args.ollama_host}")
+    print(f"  Gemini model  : {args.model or os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print(f"  MSF           : {'disabled (--no-msf)' if args.no_msf else f'{args.msf_host}:{args.msf_port}'}")
     print()
-
-    # ── StateManager ──────────────────────────────────────────────────────────
-    state = StateManager(session_dir=str(session_dir))
-    state.init(target=args.target, authorized_by=args.authorized_by)
-    _print_ok(f"Target: {args.target}  |  Authorized by: {args.authorized_by}")
-
-    # ── Scope guardrails ──────────────────────────────────────────────────────
-    guard = ScopeGuard(authorized_target=args.target, authorized_by=args.authorized_by)
-    guard.validate_startup(log)
 
     # ── LLM client + ping ──────────────────────────────────────────────────────
     _print_section("CONNECTING TO LLM")
@@ -521,92 +494,32 @@ def main():
     if missing:
         print(f"{C.YELLOW}[WARN ] Missing:   {', '.join(missing)}{C.RESET}")
 
-    # ── Phase transition logger hook ──────────────────────────────────────────
-    # Monkey-patch StateManager.advance_phase to emit log.phase() events
-    _orig_advance = state.advance_phase
-    def _logged_advance():
-        old = state.phase
-        new = _orig_advance()
-        if new != old:
-            log.phase(old, new)
-            _print_section(f"PHASE: {old} → {new}")
-        return new
-    state.advance_phase = _logged_advance
-
-    # ── Planner ────────────────────────────────────────────────────────────────
-    _print_section("STARTING AGENT LOOP")
-    log.info(f"Agent loop starting: max_iter={args.max_iter}")
-
-    planner = Planner(
-        state=state,
-        runner=runner,
-        llm=llm,
-        msf=msf_client,
-        kb=kb,
-        verbose=True,
-        logger=log,
-        guard=guard,
-    )
-
-    # ── Run ────────────────────────────────────────────────────────────────────
-    print(f"{C.GREEN}{C.BOLD}[KIRA] Agent loop starting...{C.RESET}")
-    print(f"{C.DIM}       Target: {args.target}  |  Max iterations: {args.max_iter}{C.RESET}\n")
-
-    t_start = time.monotonic()
-
+    # ── Start KiraChat ─────────────────────────────────────────────────────────
+    _print_section("KIRA CHAT")
+    
     try:
         chat = KiraChat(
-            planner=planner,
-            state=state,
+            runner=runner,
             llm=llm,
+            msf=msf_client,
+            kb=kb,
+            session_dir=session_dir,
+            log=log,
+            authorized_by=args.authorized_by,
             max_iter=args.max_iter,
             verbose=args.verbose,
+            initial_target=args.target,  # Optional target from CLI
+            no_report=args.no_report,
         )
         chat.start()
-        outcome = "DONE"   # KiraChat manages its own lifecycle
     except KeyboardInterrupt:
-        outcome = "INTERRUPTED"
-        print(f"\n{C.YELLOW}[KIRA] Interrupted by user.{C.RESET}")
+        print(f"\n{C.YELLOW}[KIRA] Session interrupted by user.{C.RESET}")
     except Exception as exc:
-        outcome = "ERROR"
         print(f"\n{C.RED}[KIRA] Unhandled error: {exc}{C.RESET}")
         import traceback; traceback.print_exc()
 
-    elapsed = time.monotonic() - t_start
-
-    # ── Session summary ────────────────────────────────────────────────────────
-    _print_section("SESSION COMPLETE")
-    finding_count = len(state.get("findings", []))
-    
-    outcome_colors = {
-        "DONE": C.GREEN, "ROOT": C.GREEN,
-        "HALTED": C.YELLOW, "MAX_ITER": C.YELLOW,
-        "INTERRUPTED": C.YELLOW, "ERROR": C.RED,
-    }
-    print(f"{outcome_colors.get(outcome, C.DIM)}{C.BOLD}Outcome: {outcome}{C.RESET}")
-    
-    _print_session_summary(state, session_dir, elapsed)
-    
-    log.info(f"Session ended: outcome={outcome} findings={finding_count}")
-
-    # ── Auto-report ────────────────────────────────────────────────────────────
-    if not args.no_report:
-        if outcome in ("DONE", "ROOT") or (outcome == "MAX_ITER" and finding_count > 0):
-            run_report(session_dir, llm, log, outcome, finding_count)
-        else:
-            _print_warn(f"No report generated (outcome={outcome}, findings={finding_count})")
-    else:
-        log.info("Report skipped: --no-report flag set")
-
-    if outcome == "DONE":
-        print(f"  {C.DIM}Next: run reporter.py to generate the full pentest report.{C.RESET}")
-    elif outcome in ("HALTED", "MAX_ITER"):
-        print(f"  {C.DIM}Tip: review {session_dir}/actions.jsonl to see why the agent stopped.{C.RESET}")
-    if not msf_client and not args.no_msf:
-        print(f"  {C.DIM}Tip: start msfrpcd to enable the EXPLOIT phase next run.{C.RESET}")
-
     print()
-    return 0 if outcome in ("DONE", "ROOT") else 1
+    return 0
 
 
 if __name__ == "__main__":

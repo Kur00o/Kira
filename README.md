@@ -233,7 +233,7 @@ xdg-open sessions/10_163_172_51_*/report.html
 | OpenAI | `--provider openai` | `OPENAI_API_KEY` | Paid |
 
 Recommended models by provider:
-- Gemini: `gemini-2.0-flash` (default) or `gemini-2.5-pro`
+- Gemini: `gemini-2.5-flash` (default) or `gemini-2.5-pro`
 - Ollama: `gemma3:12b` or `qwen2.5-coder:14b` (4b works but loops more)
 - Claude: `claude-haiku-4-5-20251001`
 - OpenAI: `gpt-4o-mini`
