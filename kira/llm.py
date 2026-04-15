@@ -1,21 +1,5 @@
 """
 kira/llm.py — LLM Interface (Gemini API)
-=========================================
-All LLM communication goes through the Google Gemini REST API.
-
-Endpoint:
-    POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}
-
-Request format:
-    {"contents": [{"parts": [{"text": "..."}]}]}
-
-Response parsing:
-    response["candidates"][0]["content"]["parts"][0]["text"]
-
-Config (env vars / .env):
-    GEMINI_API_KEY  — required, AIzaSy... key from Google AI Studio
-    GEMINI_MODEL    — optional, default gemini-2.5-flash
-    GEMINI_BASE_URL — optional, default https://generativelanguage.googleapis.com
 
 Swapping backends later:
     Replace _call() and ping() with a new provider's implementation.
@@ -238,7 +222,19 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens:  int   = 500,
     ) -> str:
-        """Free-text generation for ReportGenerator — no JSON enforcement."""
+        """Free-text generation — does NOT enforce JSON output.
+        Used by ReportGenerator for exec summary and finding writeups.
+        Includes exponential backoff for rate limits (429).
+
+        Parameters
+        ----------
+        prompt      : user prompt
+        temperature : 0.0–1.0
+        max_tokens  : approximate token cap
+
+        Returns
+        -------
+        str : raw model response, stripped of leading/trailing whitespace"""
         payload = self._build_payload(
             system=None,
             messages=[{"role": "user", "content": prompt}],
