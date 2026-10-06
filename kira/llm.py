@@ -397,7 +397,7 @@ class LLMClient:
 
     # ── Internal: Gemini API call ─────────────────────────────────────────────
 
-    def _call(self, system: str, messages: list, temperature: float) -> tuple:
+    def _call_gemini(self, system: str, messages: list, temperature: float) -> tuple:
         """
         POST to Gemini generateContent endpoint.
         Retries with exponential backoff on 429 rate limit errors.
@@ -613,20 +613,20 @@ class LLMClient:
             "ok":        ok,
             "latency_s": meta.get("latency_s"),
             "tokens":    meta.get("output_tokens"),
-            "provider":  "gemini",
+            "provider":  self.provider,
         })
 
     def _print_ok(self, action: dict, meta: dict) -> None:
         try:
             from rich.console import Console
             Console().print(
-                f"[dim][LLM/gemini][/dim] "
+                f"[dim][LLM/{self.provider}][/dim] "
                 f"[green]{action['tool']}[/green] "
                 f"[dim]({meta.get('latency_s','?')}s, "
                 f"{meta.get('output_tokens','?')} tokens)[/dim]"
             )
         except ImportError:
-            print(f"[LLM/gemini] {action['tool']} ({meta.get('latency_s')}s)")
+            print(f"[LLM/{self.provider}] {action['tool']} ({meta.get('latency_s')}s)")
 
     def _print_retry(self, attempt: int, error: str) -> None:
         try:
