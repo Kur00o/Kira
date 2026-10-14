@@ -163,21 +163,33 @@ def _make_session_dir(target: str, custom: str = None) -> Path:
 # ── LLM factory ───────────────────────────────────────────────────────────────
 
 def build_llm(args, verbose: bool) -> LLMClient:
-    """Construct Gemini LLMClient from env vars and CLI args."""
+    """Construct an LLMClient from env vars and CLI args."""
     api_key = (getattr(args, "api_key", None) or os.getenv("GEMINI_API_KEY", "")).strip()
-    model   = getattr(args, "model", None) or os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or None
+    ollama_host = (os.getenv("OLLAMA_HOST", "http://localhost:11434") or "").strip().rstrip("/")
+    ollama_model = (os.getenv("OLLAMA_MODEL", "gemma3:4b") or "").strip()
+    model = getattr(args, "model", None) or None
 
-    if not api_key:
-        _die(
-            "No Gemini API key found.\n"
-            "Set GEMINI_API_KEY in your .env file:\n"
-            "  GEMINI_API_KEY=AIzaSy..."
-        )
+    if api_key:
+        gemini_model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash") or None
+        try:
+            return LLMClient(api_key=api_key, model=gemini_model, verbose=verbose)
+        except ValueError as e:
+            _die(str(e))
 
-    try:
-        return LLMClient(api_key=api_key, model=model, verbose=verbose)
-    except ValueError as e:
-        _die(str(e))
+    if ollama_host and ollama_model:
+        try:
+            return LLMClient(host=ollama_host, model=model or ollama_model, verbose=verbose)
+        except ValueError as e:
+            _die(str(e))
+
+    _die(
+        "No LLM backend configured.\n"
+        "Set either GEMINI_API_KEY=... or both OLLAMA_HOST=... and OLLAMA_MODEL=...\n"
+        "Examples:\n"
+        "  GEMINI_API_KEY=AIzaSy...\n"
+        "  OLLAMA_HOST=http://localhost:11434\n"
+        "  OLLAMA_MODEL=gemma3:4b"
+    )
 
 
 # ── MSF factory ───────────────────────────────────────────────────────────────
@@ -460,13 +472,13 @@ def main():
 
     # ── Startup info ───────────────────────────────────────────────────────────
     print(f"  Authorized by : {C.GREEN}{args.authorized_by}{C.RESET}")
-    print(f"  Gemini model  : {args.model or os.getenv('GEMINI_MODEL', 'gemini-2.5-flash')}")
     print(f"  MSF           : {'disabled (--no-msf)' if args.no_msf else f'{args.msf_host}:{args.msf_port}'}")
     print()
 
     # ── LLM client + ping ──────────────────────────────────────────────────────
     _print_section("CONNECTING TO LLM")
     llm = build_llm(args, verbose)
+    print(f"  Active LLM    : {llm.provider} | {llm.model}")
 
     ok, msg = llm.ping()
     if ok:

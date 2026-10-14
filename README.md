@@ -12,12 +12,13 @@ _  ___
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Kali%20Linux-557C94?style=flat-square&logo=kalilinux&logoColor=white)](https://kali.org)
 [![LLM](https://img.shields.io/badge/LLM-Gemini%202.5%20Flash%20%7C%20Gemma%203-FF6B35?style=flat-square)](https://ai.google.dev)
+[![Documentation](https://img.shields.io/badge/Documentation-Kira%20Docs-2563EB?style=flat-square)](https://kira-documentation.vercel.app/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 *LLM-driven agent that autonomously runs the full pentest lifecycle —*
 *recon → enum → vuln scan → exploit → privesc → report*
 
-> ⚠️ **Authorized environments only. Unauthorized use is illegal.**
+ ⚠️ **Authorized environments only. Unauthorized use is illegal.**
 
 </div>
 
